@@ -1,4 +1,4 @@
-//Node for Extended Kalman Filter implementation
+//Node for Particle Filter implementation
 
 #include <rclcpp/rclcpp.hpp>
 

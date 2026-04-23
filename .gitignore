@@ -1,51 +1,33 @@
-# ==========================================
 # ROS 2 Colcon Directories
-# ==========================================
-# Never commit these! Colcon generates them locally when you run `colcon build`.
 build/
 install/
 log/
 
-# ==========================================
 # Data Recordings (ROS Bags)
-# ==========================================
-# If you record sensor data to test your filters offline, 
-# these files will be enormous and should not be tracked.
 *.db3
 *.bag
 rosbag2*/
 
-# ==========================================
 # Python Artifacts
-# ==========================================
-# If you write Python scripts for your evaluation metrics (RMSE, plotting)
 __pycache__/
 *.py[cod]
 *$py.class
 
-# ==========================================
 # C++ Build Artifacts
-# ==========================================
-# Mostly handled by the 'build/' ignore, but good practice to include.
 *.o
 *.so
 *.a
 *.out
 *.app
 
-# ==========================================
 # IDE / Editor Folders
-# ==========================================
-# Prevents your personal editor settings from messing with your team's repos.
 .vscode/
 .idea/
 *.swp
 *.swo
 *~
 
-# ==========================================
 # OS Generated Files
-# ==========================================
 .DS_Store
 .DS_Store?
 ._*
@@ -54,4 +36,5 @@ __pycache__/
 ehthumbs.db
 Thumbs.db
 
+#Specific Files
 Project Description.pdf
