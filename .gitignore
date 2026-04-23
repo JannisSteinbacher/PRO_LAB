@@ -1,64 +1,50 @@
 # ==========================================
-# Python
+# ROS 2 Colcon Directories
 # ==========================================
-# Byte-compiled / optimized / DLL files
+# Never commit these! Colcon generates them locally when you run `colcon build`.
+build/
+install/
+log/
+
+# ==========================================
+# Data Recordings (ROS Bags)
+# ==========================================
+# If you record sensor data to test your filters offline, 
+# these files will be enormous and should not be tracked.
+*.db3
+*.bag
+rosbag2*/
+
+# ==========================================
+# Python Artifacts
+# ==========================================
+# If you write Python scripts for your evaluation metrics (RMSE, plotting)
 __pycache__/
 *.py[cod]
 *$py.class
 
-# Virtual Environments
-venv/
-env/
-.venv/
-.env
-
-# Build/Distribution folders
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-*.egg-info/
-.installed.cfg
-
 # ==========================================
-# C++ (g++)
+# C++ Build Artifacts
 # ==========================================
-# Compiled Object files
+# Mostly handled by the 'build/' ignore, but good practice to include.
 *.o
-*.obj
-
-# Compiled Executables and Libraries
+*.so
+*.a
 *.out
 *.app
-*.exe
-*.so
-*.dylib
-*.a
-*.lib
-
-# Debug/profiling information
-*.dSYM/
-*.su
-*.idb
-*.pdb
 
 # ==========================================
-# Visual Studio Code
+# IDE / Editor Folders
 # ==========================================
-.vscode/*
-!.vscode/settings.json
-!.vscode/tasks.json
-!.vscode/launch.json
-!.vscode/extensions.json
-*.code-workspace
-
-# Local History for Visual Studio Code
-.history/
+# Prevents your personal editor settings from messing with your team's repos.
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
 
 # ==========================================
-# OS Generated Files (Good Practice)
+# OS Generated Files
 # ==========================================
 .DS_Store
 .DS_Store?
@@ -67,3 +53,5 @@ eggs/
 .Trashes
 ehthumbs.db
 Thumbs.db
+
+Project Description.pdf
