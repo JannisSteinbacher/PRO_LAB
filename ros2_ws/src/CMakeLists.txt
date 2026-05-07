@@ -13,6 +13,7 @@ find_package(rclcpp             REQUIRED)
 find_package(nav_msgs           REQUIRED)
 find_package(geometry_msgs      REQUIRED)
 find_package(sensor_msgs        REQUIRED)
+find_package(std_msgs           REQUIRED)
 find_package(tf2                REQUIRED)
 find_package(tf2_ros            REQUIRED)
 find_package(tf2_geometry_msgs  REQUIRED)
@@ -21,7 +22,7 @@ find_package(tf2_geometry_msgs  REQUIRED)
 # ==========================================
 # Add the Kalman Filter Node
 add_executable(KF_node src/KF_node.cpp)
-ament_target_dependencies(KF_node rclcpp std_msgs geometry_msgs nav_msgs sensor_msgs tf2_ros)
+ament_target_dependencies(KF_node rclcpp std_msgs tf2_geometry_msgs geometry_msgs nav_msgs sensor_msgs tf2_ros)
 
 # Add the Extended Kalman Filter Node
 add_executable(EKF_node src/EKF_node.cpp)
@@ -43,6 +44,7 @@ install(TARGETS
 
 install(DIRECTORY
   launch
+  rviz
   config
   DESTINATION share/${PROJECT_NAME}
 )
