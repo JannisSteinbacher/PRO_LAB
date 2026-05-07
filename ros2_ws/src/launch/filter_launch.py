@@ -14,24 +14,26 @@ def generate_launch_description():
     # -----------------------------
     # Nav2 TB4 Simulation Launch
     # -----------------------------
-    nav2_launch = IncludeLaunchDescription(
-    PythonLaunchDescriptionSource(
-        os.path.join(
-            get_package_share_directory('nav2_bringup'),
-            'launch',
-            'tb4_simulation_launch.py'
-        )
-    ),
-    launch_arguments={
-        'headless': 'False',
-        'rviz': 'True'
-    }.items()
-    )
-
+    
     rviz_config = os.path.join(
     get_package_share_directory('turtlebot_state_estimation'),
     'rviz',
     'rviz_config_default.rviz'
+    )
+
+    nav2_launch = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            os.path.join(
+                get_package_share_directory('nav2_bringup'),
+                'launch',
+                'tb4_simulation_launch.py'
+            )
+        ),
+        launch_arguments={
+            'headless': 'False',
+            'use_rviz': 'True',
+            'rviz_config_file': rviz_config,
+        }.items()
     )
 
     Node(
