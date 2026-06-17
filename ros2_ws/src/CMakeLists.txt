@@ -48,6 +48,8 @@ add_executable(PF_node src/PF_node.cpp)
 ament_target_dependencies(PF_node 
   rclcpp 
   std_msgs 
+  tf2
+  tf2_geometry_msgs
   geometry_msgs 
   nav_msgs 
   sensor_msgs 

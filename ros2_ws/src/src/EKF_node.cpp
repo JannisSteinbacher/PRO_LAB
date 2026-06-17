@@ -18,73 +18,84 @@
 #include <message_filters/synchronizer.h>
 
 // ============================================================
-//  KalmanFilterNode
+//  Extended Kalman Filter Node
+//
+//  Follows the EKF algorithm (Thrun, 2006):
+//
+//  Predict  (nonlinear motion model g(.)):
+//    Line 2:  mu_bar_t  = g(u_t, mu_{t-1})
+//    Line 3:  Sig_bar_t = G_t * Sigma_{t-1} * G_t^T + R_t
+//
+//  Correct  (linear measurement model via H_t):
+//    Line 4:  K_t       = Sig_bar_t * H_t^T * (H_t * Sig_bar_t * H_t^T + Q_t)^-1
+//    Line 5:  mu_t      = mu_bar_t  + K_t * (z_t - H_t * mu_bar_t)
+//    Line 6:  Sigma_t   = (I - K_t * H_t) * Sig_bar_t          (Joseph form used)
+//
+//  Differences vs. linear KF:
+//    - predict() applies the nonlinear g(.) directly for the state update
+//      instead of A_t * mu + B_t * u
+//    - predict() builds the Jacobian G_t analytically and uses it for
+//      covariance propagation instead of A_t * Sigma * A_t^T
+//    - correct() is structurally identical to the KF but uses H_t
+//      (same role as C_t in the KF) and the Joseph form for Sigma
 // ============================================================
 
-class KalmanFilterNode : public rclcpp::Node
+class ExtendedKalmanFilterNode : public rclcpp::Node
 {
 public:
-  KalmanFilterNode() : Node("kalman_filter_node")
+  ExtendedKalmanFilterNode() : Node("extended_kalman_filter_node")
   {
     // ----------------------------------------------------------
-    // Initial state  x = [0, 0, 0]
+    // Initial state  mu = [0, 0, 0]
     // ----------------------------------------------------------
-    x_ = Eigen::Vector3d::Zero();
+    mu_ = Eigen::Vector3d::Zero();
 
     // ----------------------------------------------------------
-    // Initial state covariance P  (high uncertainty at start)
+    // Initial state covariance Sigma (high uncertainty at start)
     // ----------------------------------------------------------
-    P_ = Eigen::Matrix3d::Identity() * 1.0;
+    Sigma_ = Eigen::Matrix3d::Identity() * 1.0;
 
     // ----------------------------------------------------------
-    // Process noise Q
+    // Process noise R  (added to covariance in predict step, Line 3)
     // ----------------------------------------------------------
-    Q_ = Eigen::Matrix3d::Zero();
-    Q_(0, 0) = 0.05;   
-    Q_(1, 1) = 0.05;   
-    Q_(2, 2) = 0.01;   
+    R_ = Eigen::Matrix3d::Zero();
+    R_(0, 0) = 0.05;
+    R_(1, 1) = 0.05;
+    R_(2, 2) = 0.01;
 
     // ----------------------------------------------------------
-    // Measurement noise R
+    // Measurement noise Q
     // ----------------------------------------------------------
-    R_odom_ = Eigen::Matrix3d::Zero();
-    R_odom_(0, 0) = 0.1;   
-    R_odom_(1, 1) = 0.1;   
-    R_odom_(2, 2) = 0.05;  
+    Q_odom_ = Eigen::Matrix3d::Zero();
+    Q_odom_(0, 0) = 0.1;
+    Q_odom_(1, 1) = 0.1;
+    Q_odom_(2, 2) = 0.05;
 
-    R_imu_(0, 0) = 0.02;   
+    Q_imu_(0, 0) = 0.02;
 
     // ----------------------------------------------------------
-    // Unabhängige Subscriber (Keine Synchronisation nötig)
+    // Independent Subscribers
     // ----------------------------------------------------------
     scan_sub_ = create_subscription<sensor_msgs::msg::LaserScan>(
       "/scan", 10,
-      std::bind(&KalmanFilterNode::scanCallback, this, std::placeholders::_1));
+      std::bind(&ExtendedKalmanFilterNode::scanCallback, this, std::placeholders::_1));
 
     cmd_vel_sub_ = create_subscription<geometry_msgs::msg::Twist>(
       "/cmd_vel", 10,
-      std::bind(&KalmanFilterNode::cmdVelCallback, this, std::placeholders::_1));
+      std::bind(&ExtendedKalmanFilterNode::cmdVelCallback, this, std::placeholders::_1));
 
     // ----------------------------------------------------------
-    // Synchronisierte Subscriber (Odom & IMU)
+    // Synchronized Subscribers (Odom & IMU)
     // ----------------------------------------------------------
-    
-    // 1. Initialisiere die message_filters Subscriber
-    // Sie fangen die Nachrichten ab und leiten sie an den Synchronizer weiter.
     odom_filter_.subscribe(this, "/odom");
     imu_filter_.subscribe(this, "/imu");
 
-    // 2. Erstelle den Synchronizer mit unserer definierten Policy (siehe private Member)
-    // Der erste Parameter (10) ist die Größe der Warteschlange (Queue Size).
     sync_ = std::make_shared<message_filters::Synchronizer<SyncPolicy>>(
       SyncPolicy(10), odom_filter_, imu_filter_
     );
 
-    // 3. Registriere den gemeinsamen Callback
-    // Diese Funktion wird NUR aufgerufen, wenn Odom und IMU ungefähr den 
-    // gleichen Zeitstempel haben.
     sync_->registerCallback(
-      std::bind(&KalmanFilterNode::syncCallback, this, std::placeholders::_1, std::placeholders::_2)
+      std::bind(&ExtendedKalmanFilterNode::syncCallback, this, std::placeholders::_1, std::placeholders::_2)
     );
 
     // ----------------------------------------------------------
@@ -95,80 +106,108 @@ public:
 
     timer_ = create_wall_timer(
       std::chrono::milliseconds(100),
-      std::bind(&KalmanFilterNode::publishEstimate, this));
+      std::bind(&ExtendedKalmanFilterNode::publishEstimate, this));
 
     last_time_ = this->get_clock()->now();
 
-    RCLCPP_INFO(get_logger(), "Kalman Filter node started (mit Synchronisierung).");
+    RCLCPP_INFO(get_logger(), "Extended Kalman Filter node started.");
   }
 
 private:
-  // ============================================================
-  //  Typendefinition für die Synchronisierung
-  // ============================================================
-  // Dies definiert die Regeln für den ApproximateTimeSynchronizer.
-  // Er vergleicht die Zeitstempel von nav_msgs::msg::Odometry und sensor_msgs::msg::Imu.
   typedef message_filters::sync_policies::ApproximateTime<
-    nav_msgs::msg::Odometry, 
+    nav_msgs::msg::Odometry,
     sensor_msgs::msg::Imu
   > SyncPolicy;
 
 
   // ============================================================
-  //  KF Core (Predict & Correct bleiben exakt gleich!)
+  //  EKF Core Algorithm
   // ============================================================
 
   void predict(double dt)
   {
-    const double theta = x_(2);
+    const double theta = mu_(2);
 
-    x_(0) += v_ * std::cos(theta) * dt;
-    x_(1) += v_ * std::sin(theta) * dt;
-    x_(2) += omega_ * dt;
-    x_(2)  = normalizeAngle(x_(2));
+    // -------------------------------------------------------
+    // Line 2: mu_bar_t = g(u_t, mu_{t-1})
+    //
+    // Nonlinear motion model g(.) for a differential-drive robot
+    // (slide 37):
+    //   x_t     = x_{t-1}     + v * cos(theta_{t-1}) * dt
+    //   y_t     = y_{t-1}     + v * sin(theta_{t-1}) * dt
+    //   theta_t = theta_{t-1} + omega * dt
+    //
+    // This replaces the linear  A_t * mu + B_t * u  of the KF.
+    // -------------------------------------------------------
+    mu_(0) += v_ * std::cos(theta) * dt;
+    mu_(1) += v_ * std::sin(theta) * dt;
+    mu_(2) += omega_ * dt;
+    mu_(2)  = normalizeAngle(mu_(2));
 
-    Eigen::Matrix3d F = Eigen::Matrix3d::Identity();
-    F(0, 2) = -v_ * std::sin(theta) * dt;
-    F(1, 2) =  v_ * std::cos(theta) * dt;
+    // -------------------------------------------------------
+    // Line 3: Sigma_bar_t = G_t * Sigma_{t-1} * G_t^T + R_t
+    //
+    // G_t is the Jacobian of g(.) w.r.t. the state x,
+    // evaluated at mu_{t-1}  (slide 41):
+    //
+    //       | 1   0   -v*sin(theta)*dt |
+    //  G_t =| 0   1    v*cos(theta)*dt |
+    //       | 0   0         1          |
+    //
+    // This replaces  A_t * Sigma * A_t^T  of the KF.
+    // -------------------------------------------------------
+    Eigen::Matrix3d G_t = Eigen::Matrix3d::Identity();
+    G_t(0, 2) = -v_ * std::sin(theta) * dt;
+    G_t(1, 2) =  v_ * std::cos(theta) * dt;
 
-    P_ = F * P_ * F.transpose() + Q_;
+    Sigma_ = G_t * Sigma_ * G_t.transpose() + R_;
   }
 
+  // ----------------------------------------------------------
+  // correct()  —  Lines 4-6 of the EKF algorithm.
+  //
+  // Structurally identical to the linear KF correct() step;
+  // H_t plays the same role as C_t in the KF.
+  //
+  //   Line 4: K_t     = Sigma_bar * H_t^T * (H_t * Sigma_bar * H_t^T + Q)^-1
+  //   Line 5: mu_t    = mu_bar + K_t * (z_t - H_t * mu_bar)
+  //   Line 6: Sigma_t = (I - K_t * H_t) * Sigma_bar   [Joseph form]
+  // ----------------------------------------------------------
   template<int M>
   void correct(const Eigen::Matrix<double, M, 1>& z,
-               const Eigen::Matrix<double, M, 3>& H,
-               const Eigen::Matrix<double, M, M>& R)
+               const Eigen::Matrix<double, M, 3>& H_t,
+               const Eigen::Matrix<double, M, M>& Q)
   {
-    Eigen::Matrix<double, M, 1> y = z - H * x_;
+    // Innovation:  z_t - H_t * mu_bar_t
+    Eigen::Matrix<double, M, 1> innovation = z - H_t * mu_;
 
+    // Handle angle wrap-around for yaw components
     for (int i = 0; i < M; ++i) {
-      if (std::abs(y(i)) > M_PI && std::abs(z(i)) < M_PI + 0.5) {
-        y(i) = normalizeAngle(y(i));
+      if (std::abs(innovation(i)) > M_PI && std::abs(z(i)) < M_PI + 0.5) {
+        innovation(i) = normalizeAngle(innovation(i));
       }
     }
 
-    const Eigen::Matrix<double, M, M> S = H * P_ * H.transpose() + R;
-    const Eigen::Matrix<double, 3, M> K = P_ * H.transpose() * S.inverse();
+    // Line 4: Kalman Gain
+    const Eigen::Matrix<double, M, M> S  = H_t * Sigma_ * H_t.transpose() + Q;
+    const Eigen::Matrix<double, 3, M> K_t = Sigma_ * H_t.transpose() * S.inverse();
 
-    x_ = x_ + K * y;
-    x_(2) = normalizeAngle(x_(2));
+    // Line 5: State update
+    mu_ = mu_ + K_t * innovation;
+    mu_(2) = normalizeAngle(mu_(2));
 
-    const Eigen::Matrix3d I_KH = Eigen::Matrix3d::Identity() - K * H;
-    P_ = I_KH * P_ * I_KH.transpose() + K * R * K.transpose();
+    // Line 6: Covariance update  (Joseph form for numerical stability)
+    const Eigen::Matrix3d I_KH = Eigen::Matrix3d::Identity() - K_t * H_t;
+    Sigma_ = I_KH * Sigma_ * I_KH.transpose() + K_t * Q * K_t.transpose();
   }
 
   // ============================================================
   //  Callbacks
   // ============================================================
 
-  // --- NEUER GEMEINSAMER CALLBACK ---
-  // Diese Funktion ersetzt die individuellen Aufrufe durch ROS.
   void syncCallback(const nav_msgs::msg::Odometry::ConstSharedPtr& odom_msg,
                     const sensor_msgs::msg::Imu::ConstSharedPtr& imu_msg)
   {
-    // Wir rufen hier einfach nacheinander deine bestehenden Logiken auf.
-    // Da wir nun wissen, dass diese Nachrichten quasi zeitgleich entstanden sind,
-    // explodiert die Kovarianz nicht mehr.
     processOdom(odom_msg);
     processImu(imu_msg);
   }
@@ -184,25 +223,24 @@ private:
     const double dt = (now - last_time_).seconds();
     last_time_ = now;
 
-    if (dt > 0.0 && dt < 1.0) { 
+    if (dt > 0.0 && dt < 1.0) {
       predict(dt);
     }
   }
 
-  // Dies war vorher "odomCallback" - umbenannt, da es nun aus syncCallback aufgerufen wird
   void processOdom(const nav_msgs::msg::Odometry::ConstSharedPtr& msg)
   {
     const double yaw = quaternionToYaw(msg->pose.pose.orientation);
 
     if (!initialized_) {
-      x_(0)        = msg->pose.pose.position.x;
-      x_(1)        = msg->pose.pose.position.y;
-      x_(2)        = yaw;
+      mu_(0)       = msg->pose.pose.position.x;
+      mu_(1)       = msg->pose.pose.position.y;
+      mu_(2)       = yaw;
       last_time_   = this->get_clock()->now();
       initialized_ = true;
       RCLCPP_INFO(get_logger(),
-                  "KF initialised from odometry: x=%.3f  y=%.3f  theta=%.3f",
-                  x_(0), x_(1), x_(2));
+                  "EKF initialised from odometry: x=%.3f  y=%.3f  theta=%.3f",
+                  mu_(0), mu_(1), mu_(2));
       return;
     }
 
@@ -210,11 +248,11 @@ private:
                             msg->pose.pose.position.y,
                             yaw);
 
-    const Eigen::Matrix3d H = Eigen::Matrix3d::Identity();
-    correct<3>(z, H, R_odom_);
+    // H_t maps the full state [x, y, theta] directly to [x, y, theta]
+    const Eigen::Matrix3d H_t = Eigen::Matrix3d::Identity();
+    correct<3>(z, H_t, Q_odom_);
   }
 
-  // Dies war vorher "imuCallback" - umbenannt, da es nun aus syncCallback aufgerufen wird
   void processImu(const sensor_msgs::msg::Imu::ConstSharedPtr& msg)
   {
     if (!initialized_) return;
@@ -222,16 +260,17 @@ private:
     Eigen::Matrix<double, 1, 1> z;
     z(0, 0) = quaternionToYaw(msg->orientation);
 
-    Eigen::Matrix<double, 1, 3> H;
-    H << 0.0, 0.0, 1.0;
+    // H_t maps the state [x, y, theta] to [theta] only (slide 21)
+    Eigen::Matrix<double, 1, 3> H_t;
+    H_t << 0.0, 0.0, 1.0;
 
-    correct<1>(z, H, R_imu_);
+    correct<1>(z, H_t, Q_imu_);
   }
 
   void scanCallback(const sensor_msgs::msg::LaserScan::SharedPtr msg)
   {
     if (!initialized_) return;
-    (void)msg;   
+    (void)msg;
   }
 
   // ============================================================
@@ -245,24 +284,24 @@ private:
     out.header.stamp    = this->get_clock()->now();
     out.header.frame_id = "map";
 
-    out.pose.pose.position.x = x_(0);
-    out.pose.pose.position.y = x_(1);
+    out.pose.pose.position.x = mu_(0);
+    out.pose.pose.position.y = mu_(1);
     out.pose.pose.position.z = 0.0;
 
     tf2::Quaternion q;
-    q.setRPY(0.0, 0.0, x_(2));
+    q.setRPY(0.0, 0.0, mu_(2));
     out.pose.pose.orientation = tf2::toMsg(q);
 
     out.pose.covariance.fill(0.0);
-    out.pose.covariance[0]  = P_(0, 0);   
-    out.pose.covariance[1]  = P_(0, 1);   
-    out.pose.covariance[5]  = P_(0, 2);   
-    out.pose.covariance[6]  = P_(1, 0);   
-    out.pose.covariance[7]  = P_(1, 1);   
-    out.pose.covariance[11] = P_(1, 2);   
-    out.pose.covariance[30] = P_(2, 0);   
-    out.pose.covariance[31] = P_(2, 1);   
-    out.pose.covariance[35] = P_(2, 2);   
+    out.pose.covariance[0]  = Sigma_(0, 0);
+    out.pose.covariance[1]  = Sigma_(0, 1);
+    out.pose.covariance[5]  = Sigma_(0, 2);
+    out.pose.covariance[6]  = Sigma_(1, 0);
+    out.pose.covariance[7]  = Sigma_(1, 1);
+    out.pose.covariance[11] = Sigma_(1, 2);
+    out.pose.covariance[30] = Sigma_(2, 0);
+    out.pose.covariance[31] = Sigma_(2, 1);
+    out.pose.covariance[35] = Sigma_(2, 2);
 
     pose_pub_->publish(out);
   }
@@ -289,27 +328,25 @@ private:
   //  Members
   // ============================================================
 
-  Eigen::Vector3d x_;                       
-  Eigen::Matrix3d P_;                       
-  Eigen::Matrix3d Q_;                       
-  Eigen::Matrix3d R_odom_;                  
-  Eigen::Matrix<double, 1, 1> R_imu_;       
+  Eigen::Vector3d mu_;                      // State mean  [x, y, theta]
+  Eigen::Matrix3d Sigma_;                   // State covariance
+  Eigen::Matrix3d R_;                       // Process noise (predict step, Line 3)
+  Eigen::Matrix3d Q_odom_;                  // Odometry measurement noise (correct step, Line 4)
+  Eigen::Matrix<double, 1, 1> Q_imu_;      // IMU measurement noise     (correct step, Line 4)
 
-  double v_     {0.0};    
-  double omega_ {0.0};    
+  double v_     {0.0};   // Linear  velocity from /cmd_vel
+  double omega_ {0.0};   // Angular velocity from /cmd_vel
 
   rclcpp::Time last_time_;
   bool initialized_ {false};
 
-  // --- NEUE MEMBER FÜR MESSAGE FILTERS ---
   message_filters::Subscriber<nav_msgs::msg::Odometry> odom_filter_;
-  message_filters::Subscriber<sensor_msgs::msg::Imu> imu_filter_;
+  message_filters::Subscriber<sensor_msgs::msg::Imu>   imu_filter_;
   std::shared_ptr<message_filters::Synchronizer<SyncPolicy>> sync_;
 
-  // Alte Standard-Subscriber bleiben für Scan und Cmd_Vel
   rclcpp::Subscription<sensor_msgs::msg::LaserScan>::SharedPtr scan_sub_;
   rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr   cmd_vel_sub_;
-  
+
   rclcpp::Publisher<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr pose_pub_;
   rclcpp::TimerBase::SharedPtr timer_;
 };
@@ -320,7 +357,7 @@ private:
 int main(int argc, char* argv[])
 {
   rclcpp::init(argc, argv);
-  rclcpp::spin(std::make_shared<KalmanFilterNode>());
+  rclcpp::spin(std::make_shared<ExtendedKalmanFilterNode>());
   rclcpp::shutdown();
   return 0;
 }

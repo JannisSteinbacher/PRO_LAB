@@ -37,22 +37,22 @@ public:
     Sigma_ = Eigen::Matrix3d::Identity() * 1.0;
 
     // ----------------------------------------------------------
-    // Process noise Q (Note: Slides refer to this as R_t)
+    // Process noise R 
     // ----------------------------------------------------------
-    Q_ = Eigen::Matrix3d::Zero();
-    Q_(0, 0) = 0.05;   
-    Q_(1, 1) = 0.05;   
-    Q_(2, 2) = 0.01;   
+    R_ = Eigen::Matrix3d::Zero();
+    R_(0, 0) = 0.05;   
+    R_(1, 1) = 0.05;   
+    R_(2, 2) = 0.01;   
 
     // ----------------------------------------------------------
-    // Measurement noise R (Note: Slides refer to this as Q_t)
+    // Measurement noise Q 
     // ----------------------------------------------------------
-    R_odom_ = Eigen::Matrix3d::Zero();
-    R_odom_(0, 0) = 0.1;   
-    R_odom_(1, 1) = 0.1;   
-    R_odom_(2, 2) = 0.05;  
+    Q_odom_ = Eigen::Matrix3d::Zero();
+    Q_odom_(0, 0) = 0.1;   
+    Q_odom_(1, 1) = 0.1;   
+    Q_odom_(2, 2) = 0.05;  
 
-    R_imu_(0, 0) = 0.02;   
+    Q_imu_(0, 0) = 0.02;   
 
     // ----------------------------------------------------------
     // Independent Subscribers
@@ -102,29 +102,35 @@ private:
 
 
   // ============================================================
-  //  Linear KF Core Algorithm (Based on Slides 25/26)
+  //  Prediction Step (linear KF model from the slides)
   // ============================================================
 
   void predict(double dt)
   {
-    // A_t: State transition matrix (Identity for linear increment model)
+    // 1. Control vector u_t = [v, omega]^T directly from cmd_vel.
+    Eigen::Vector2d u_t(v_, omega_);
+
+    // 2. Linear state prediction:
+    //
+    //   mu_t = A_t * mu_{t-1} + B_t * u_t
+    //
+    // This is intentionally linear. It does not rotate the translational
+    // velocity with cos(theta)/sin(theta); that nonlinear model belongs to
+    // the EKF.
     Eigen::Matrix3d A_t = Eigen::Matrix3d::Identity();
 
-    // B_t: Control input matrix (Identity)
-    Eigen::Matrix3d B_t = Eigen::Matrix3d::Identity();
+    Eigen::Matrix<double, 3, 2> B_t;
+    B_t << dt, 0.0,
+           0.0, 0.0,
+           0.0, dt;
 
-    // Pseudo-control vector to calculate positional increments
-    Eigen::Vector3d u_t;
-    u_t(0) = v_ * std::cos(mu_(2)) * dt;
-    u_t(1) = v_ * std::sin(mu_(2)) * dt;
-    u_t(2) = omega_ * dt;
-
-    // Line 2: \bar{mu}_t = A_t * mu_{t-1} + B_t * u_t
     mu_ = A_t * mu_ + B_t * u_t;
-    mu_(2)  = normalizeAngle(mu_(2));
+    mu_(2) = normalizeAngle(mu_(2));
 
-    // Line 3: \bar{Sigma}_t = A_t * Sigma_{t-1} * A_t^T + Process Noise
-    Sigma_ = A_t * Sigma_ * A_t.transpose() + Q_;
+    // 3. Linear covariance prediction:
+    //
+    //   Sigma_t = A_t * Sigma_{t-1} * A_t^T + R_t
+    Sigma_ = A_t * Sigma_ * A_t.transpose() + R_;
   }
 
   template<int M>
@@ -204,7 +210,7 @@ private:
 
     // Measurement Matrix C_t for Odom (maps state [x, y, theta] directly to [x, y, theta])
     const Eigen::Matrix3d C_t = Eigen::Matrix3d::Identity();
-    correct<3>(z, C_t, R_odom_);
+    correct<3>(z, C_t, Q_odom_);
   }
 
   void processImu(const sensor_msgs::msg::Imu::ConstSharedPtr& msg)
@@ -218,7 +224,7 @@ private:
     Eigen::Matrix<double, 1, 3> C_t;
     C_t << 0.0, 0.0, 1.0;
 
-    correct<1>(z, C_t, R_imu_);
+    correct<1>(z, C_t, Q_imu_);
   }
 
   void scanCallback(const sensor_msgs::msg::LaserScan::SharedPtr msg)
@@ -284,9 +290,9 @@ private:
 
   Eigen::Vector3d mu_;                       
   Eigen::Matrix3d Sigma_;                       
-  Eigen::Matrix3d Q_;                       
-  Eigen::Matrix3d R_odom_;                  
-  Eigen::Matrix<double, 1, 1> R_imu_;       
+  Eigen::Matrix3d R_;                       
+  Eigen::Matrix3d Q_odom_;                  
+  Eigen::Matrix<double, 1, 1> Q_imu_;       
 
   double v_     {0.0};    
   double omega_ {0.0};    
