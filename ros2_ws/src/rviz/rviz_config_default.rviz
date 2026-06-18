@@ -7,10 +7,8 @@ Panels:
         - /Global Options1
         - /TF1
         - /TF1/Tree1
-        - /PoseWithCovariance1
         - /PoseWithCovariance1/Covariance1
         - /PoseWithCovariance1/Covariance1/Position1
-        - /PoseWithCovariance2
         - /PoseWithCovariance2/Covariance1
         - /PoseWithCovariance2/Covariance1/Position1
       Splitter Ratio: 0.5833333134651184
@@ -313,12 +311,17 @@ Visualization Manager:
       Use Timestamp: false
       Value: true
     - Alpha: 1
-      Class: nav2_rviz_plugins/ParticleCloud
+      Arrow Length: 0.07000000029802322
+      Axes Length: 0.30000001192092896
+      Axes Radius: 0.009999999776482582
+      Class: rviz_default_plugins/PoseArray
       Color: 0; 180; 0
       Enabled: true
-      Max Arrow Length: 0.30000001192092896
-      Min Arrow Length: 0.019999999552965164
-      Name: Amcl Particle Swarm
+      Head Length: 0.07000000029802322
+      Head Radius: 0.029999999329447746
+      Name: PF Particle Cloud
+      Shaft Length: 0.23000000417232513
+      Shaft Radius: 0.009999999776482582
       Shape: Arrow (Flat)
       Topic:
         Depth: 5
@@ -698,6 +701,41 @@ Visualization Manager:
         Reliability Policy: Reliable
         Value: /ekf/pose_estimate
       Value: true
+    - Alpha: 1
+      Axes Length: 1
+      Axes Radius: 0.10000000149011612
+      Class: rviz_default_plugins/PoseWithCovariance
+      Color: 0; 0; 255
+      Covariance:
+        Orientation:
+          Alpha: 0.5
+          Color: 255; 255; 127
+          Color Style: Unique
+          Frame: Local
+          Offset: 1
+          Scale: 1
+          Value: true
+        Position:
+          Alpha: 0.30000001192092896
+          Color: 0; 0; 255
+          Scale: 1
+          Value: true
+        Value: true
+      Enabled: true
+      Head Length: 0.30000001192092896
+      Head Radius: 0.10000000149011612
+      Name: PoseWithCovariance
+      Shaft Length: 1
+      Shaft Radius: 0.05000000074505806
+      Shape: Arrow
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        Filter size: 10
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /pf/pose_estimate
+      Value: true
   Enabled: true
   Global Options:
     Background Color: 48; 48; 48
@@ -745,11 +783,11 @@ Visualization Manager:
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Scale: 125.4043960571289
+      Scale: 30.734214782714844
       Target Frame: <Fixed Frame>
       Value: TopDownOrtho (rviz_default_plugins)
-      X: 9.683870315551758
-      Y: 1.5046882629394531
+      X: 6.2987213134765625
+      Y: -0.08691388368606567
     Saved: ~
 Window Geometry:
   Displays:

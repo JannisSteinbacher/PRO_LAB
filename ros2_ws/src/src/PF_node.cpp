@@ -1,414 +1,315 @@
-// Node for Particle Filter implementation
-
-#include <algorithm>
 #include <cmath>
-#include <numeric>
 #include <random>
 #include <vector>
+#include <array>
 
 #include <rclcpp/rclcpp.hpp>
 
-#include <geometry_msgs/msg/pose_array.hpp>
+#include <geometry_msgs/msg/twist.hpp>
 #include <geometry_msgs/msg/pose_with_covariance_stamped.hpp>
-#include <nav_msgs/msg/odometry.hpp>
-#include <sensor_msgs/msg/imu.hpp>
-#include <sensor_msgs/msg/laser_scan.hpp>
+#include <geometry_msgs/msg/pose_array.hpp>
 
-#include <tf2/LinearMath/Matrix3x3.h>
 #include <tf2/LinearMath/Quaternion.h>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 
 // ============================================================
-//  Particle Filter Node
+//  Monte Carlo Localization (Particle Filter) Node
 //
-//  Implements the slide algorithm:
-//    1. sample particles from the motion model
-//    2. weight moved particles with a measurement model
-//    3. resample particles proportional to their weights
+//  Implements Algorithm MCL (Thrun 2006, slide 22):
 //
-//  Motion model:
-//    Odometry delta with sampled Gaussian translation/rotation noise.
+//  MCL(X_{t-1}, u_t, z_t, m):
+//    Line 3-7:  for each particle m:
+//                 x_t^[m] = sample_motion_model(u_t, x_{t-1}^[m])   <- predict
+//    Line 8-11: resample M particles with probability ∝ w_t^[i]      <- resample
 //
-//  Measurement model:
-//    IMU yaw likelihood. The /scan subscriber is kept for the map/laser
-//    measurement model that the slides describe as the next step.
+//  Motion Model — sample_motion_model_velocity (slide 19, 04 PDF):
+//    v_hat     = v     + N(0, (alpha1*|v| + alpha2*|w|)^2 )
+//    w_hat     = omega + N(0, (alpha3*|v| + alpha4*|w|)^2 )
+//    gamma_hat =         N(0, (alpha5*|v| + alpha6*|w|)^2 )
+//    x'     = x - (v_hat/w_hat)*sin(theta) + (v_hat/w_hat)*sin(theta + w_hat*dt)
+//    y'     = y + (v_hat/w_hat)*cos(theta) - (v_hat/w_hat)*cos(theta + w_hat*dt)
+//    theta' = theta + w_hat*dt + gamma_hat*dt
 // ============================================================
+
+struct Particle {
+    double x;
+    double y;
+    double theta;
+    double weight;
+};
 
 class ParticleFilterNode : public rclcpp::Node
 {
 public:
-  ParticleFilterNode()
-  : Node("particle_filter_node"),
-    rng_(std::random_device{}())
-  {
-    odom_sub_ = create_subscription<nav_msgs::msg::Odometry>(
-      "/odom", 10,
-      std::bind(&ParticleFilterNode::odomCallback, this, std::placeholders::_1));
+    ParticleFilterNode()
+    : Node("particle_filter_node"), gen_(std::random_device{}())
+    {
+        // Number of particles
+        M_ = 500;
 
-    imu_sub_ = create_subscription<sensor_msgs::msg::Imu>(
-      "/imu", 10,
-      std::bind(&ParticleFilterNode::imuCallback, this, std::placeholders::_1));
+        // Map bounds for uniform random initialization over the whole map
+        map_x_min_ = -3.0;
+        map_x_max_ =  3.0;
+        map_y_min_ = -3.0;
+        map_y_max_ =  3.0;
 
-    scan_sub_ = create_subscription<sensor_msgs::msg::LaserScan>(
-      "/scan", 10,
-      std::bind(&ParticleFilterNode::scanCallback, this, std::placeholders::_1));
+        // Motion noise parameters alpha_1 .. alpha_6 (slide 19, 04 PDF)
+        // sigma_v     = alpha[0]*|v| + alpha[1]*|omega|
+        // sigma_omega = alpha[2]*|v| + alpha[3]*|omega|
+        // sigma_gamma = alpha[4]*|v| + alpha[5]*|omega|
+        alpha_ = {0.1, 0.05, 0.05, 0.1, 0.02, 0.02};
 
-    pose_pub_ = create_publisher<geometry_msgs::msg::PoseWithCovarianceStamped>(
-      "/pf/pose_estimate", 10);
+        // Initialize: uniform distribution over whole map (slide 07, 05 PDF)
+        initParticles();
 
-    particle_pub_ = create_publisher<geometry_msgs::msg::PoseArray>(
-      "/particle_cloud", 10);
+        // Subscriptions
+        cmd_vel_sub_ = create_subscription<geometry_msgs::msg::Twist>(
+            "/cmd_vel", 10,
+            std::bind(&ParticleFilterNode::cmdVelCallback, this, std::placeholders::_1));
 
-    RCLCPP_INFO(get_logger(), "Particle Filter node started with %zu particles.", num_particles_);
-  }
+        // Publishers
+        pose_pub_ = create_publisher<geometry_msgs::msg::PoseWithCovarianceStamped>(
+            "/pf/pose_estimate", 10);
+
+        particles_pub_ = create_publisher<geometry_msgs::msg::PoseArray>(
+            "/pf/particles", 10);
+
+        timer_ = create_wall_timer(
+            std::chrono::milliseconds(100),
+            std::bind(&ParticleFilterNode::publishEstimate, this));
+
+        last_time_ = this->get_clock()->now();
+
+        RCLCPP_INFO(get_logger(),
+            "Particle Filter node started.  M=%d  map=[%.1f,%.1f]x[%.1f,%.1f]",
+            M_, map_x_min_, map_x_max_, map_y_min_, map_y_max_);
+    }
 
 private:
-  struct Particle
-  {
-    double x {0.0};
-    double y {0.0};
-    double theta {0.0};
-    double weight {1.0};
-  };
 
-  struct EigenLikeCovariance
-  {
-    double xx {0.0};
-    double xy {0.0};
-    double xt {0.0};
-    double yy {0.0};
-    double yt {0.0};
-    double tt {0.0};
-  };
+    // ============================================================
+    //  Initialization — uniform random distribution over the whole map.
+    //  (slide 07, 05 PDF: "hundreds of particles placed randomly in the map")
+    // ============================================================
+    void initParticles()
+    {
+        particles_.resize(M_);
+        std::uniform_real_distribution<double> dx(map_x_min_, map_x_max_);
+        std::uniform_real_distribution<double> dy(map_y_min_, map_y_max_);
+        std::uniform_real_distribution<double> dth(-M_PI, M_PI);
 
-  // ============================================================
-  //  Particle Filter Core Algorithm
-  // ============================================================
-
-  void initializeParticles(double x, double y, double theta)
-  {
-    particles_.clear();
-    particles_.reserve(num_particles_);
-
-    for (size_t i = 0; i < num_particles_; ++i) {
-      Particle p;
-      p.x = x + sampleGaussian(init_position_stddev_);
-      p.y = y + sampleGaussian(init_position_stddev_);
-      p.theta = normalizeAngle(theta + sampleGaussian(init_yaw_stddev_));
-      p.weight = 1.0 / static_cast<double>(num_particles_);
-      particles_.push_back(p);
+        for (auto& p : particles_) {
+            p.x      = dx(gen_);
+            p.y      = dy(gen_);
+            p.theta  = dth(gen_);
+            p.weight = 1.0 / M_;
+        }
     }
 
-    initialized_ = true;
-  }
+    // ============================================================
+    //  Motion Model — sample_motion_model_velocity (slide 19, 04 PDF)
+    //
+    //  Lines 2-3: Add Gaussian noise to v and omega at the source
+    //             (wheels), propagated through the kinematic model.
+    //  Line  4:   Additional heading drift noise gamma.
+    //  Lines 5-7: Apply ICC-based kinematic model with noisy inputs.
+    // ============================================================
+    Particle sampleMotionModel(const Particle& prev,
+                               double v, double omega, double dt) const
+    {
+        // Noise standard deviations (lines 2-4 of algorithm, slide 19)
+        const double sv = alpha_[0] * std::abs(v) + alpha_[1] * std::abs(omega);
+        const double sw = alpha_[2] * std::abs(v) + alpha_[3] * std::abs(omega);
+        const double sg = alpha_[4] * std::abs(v) + alpha_[5] * std::abs(omega);
 
-  void sampleMotionModel(double delta_rot1, double delta_trans, double delta_rot2)
-  {
-    for (auto& p : particles_) {
-      const double trans_stddev = trans_noise_stddev_ * std::abs(delta_trans) + trans_noise_min_stddev_;
-      const double rot1_stddev = rot_noise_stddev_ * std::abs(delta_rot1) + rot_noise_min_stddev_;
-      const double rot2_stddev = rot_noise_stddev_ * std::abs(delta_rot2) + rot_noise_min_stddev_;
+        // Guard: always give a minimum spread so particles don't freeze
+        auto noise = [&](double sigma) -> double {
+            std::normal_distribution<double> nd(0.0, std::max(sigma, 1e-9));
+            return nd(gen_);
+        };
 
-      const double delta_rot1_hat = delta_rot1 + sampleGaussian(rot1_stddev);
-      const double delta_trans_hat = delta_trans + sampleGaussian(trans_stddev);
-      const double delta_rot2_hat = delta_rot2 + sampleGaussian(rot2_stddev);
+        // Line 2: v_hat     = v     + sample(sv)
+        // Line 3: omega_hat = omega + sample(sw)
+        // Line 4: gamma_hat =         sample(sg)
+        const double v_hat     = v     + noise(sv);
+        const double omega_hat = omega + noise(sw);
+        const double gamma_hat =         noise(sg);
 
-      p.x += delta_trans_hat * std::cos(p.theta + delta_rot1_hat);
-      p.y += delta_trans_hat * std::sin(p.theta + delta_rot1_hat);
-      p.theta = normalizeAngle(p.theta + delta_rot1_hat + delta_rot2_hat);
-    }
-  }
+        Particle next;
+        next.weight = prev.weight;
 
-  void measurementModel()
-  {
-    if (!have_imu_) {
-      setUniformWeights();
-      return;
-    }
+        if (std::abs(omega_hat) > 1e-6) {
+            // Lines 5-7: general curved-path model (ICC / circular arc)
+            const double r = v_hat / omega_hat;
+            next.x     = prev.x - r * std::sin(prev.theta)
+                                 + r * std::sin(prev.theta + omega_hat * dt);
+            next.y     = prev.y + r * std::cos(prev.theta)
+                                 - r * std::cos(prev.theta + omega_hat * dt);
+            next.theta = prev.theta + omega_hat * dt + gamma_hat * dt;
+        } else {
+            // Degenerate case: straight-line motion (omega ≈ 0)
+            next.x     = prev.x + v_hat * std::cos(prev.theta) * dt;
+            next.y     = prev.y + v_hat * std::sin(prev.theta) * dt;
+            next.theta = prev.theta + gamma_hat * dt;
+        }
 
-    double weight_sum = 0.0;
-
-    for (auto& p : particles_) {
-      const double yaw_error = normalizeAngle(latest_imu_yaw_ - p.theta);
-      p.weight = gaussianLikelihood(yaw_error, imu_yaw_stddev_);
-      weight_sum += p.weight;
-    }
-
-    normalizeWeights(weight_sum);
-  }
-
-  void resample()
-  {
-    if (particles_.empty()) return;
-
-    std::vector<Particle> resampled;
-    resampled.reserve(num_particles_);
-
-    const double step = 1.0 / static_cast<double>(num_particles_);
-    std::uniform_real_distribution<double> uniform_dist(0.0, step);
-    double target = uniform_dist(rng_);
-    double cumulative_weight = particles_.front().weight;
-    size_t index = 0;
-
-    for (size_t i = 0; i < num_particles_; ++i) {
-      while (target > cumulative_weight && index + 1 < particles_.size()) {
-        ++index;
-        cumulative_weight += particles_[index].weight;
-      }
-
-      Particle p = particles_[index];
-      p.weight = 1.0 / static_cast<double>(num_particles_);
-      resampled.push_back(p);
-      target += step;
+        next.theta = normalizeAngle(next.theta);
+        return next;
     }
 
-    particles_ = std::move(resampled);
-  }
+    // ============================================================
+    //  Systematic resampling — Lines 8-11 of MCL algorithm (slide 22, 05 PDF)
+    //
+    //  Draws M particles from the weighted set with probability ∝ weight.
+    //  Systematic resampling has lower variance than multinomial and O(M) cost.
+    // ============================================================
+    std::vector<Particle> systematicResample(const std::vector<Particle>& weighted)
+    {
+        // Build cumulative weight vector
+        std::vector<double> cdf(M_);
+        cdf[0] = weighted[0].weight;
+        for (int i = 1; i < M_; ++i)
+            cdf[i] = cdf[i-1] + weighted[i].weight;
 
-  Particle estimatePose() const
-  {
-    Particle estimate;
-    double sin_sum = 0.0;
-    double cos_sum = 0.0;
+        // Single random offset u ~ U[0, 1/M]
+        std::uniform_real_distribution<double> ud(0.0, 1.0 / M_);
+        const double u0 = ud(gen_);
 
-    for (const auto& p : particles_) {
-      estimate.x += p.weight * p.x;
-      estimate.y += p.weight * p.y;
-      sin_sum += p.weight * std::sin(p.theta);
-      cos_sum += p.weight * std::cos(p.theta);
+        std::vector<Particle> resampled;
+        resampled.reserve(M_);
+
+        int j = 0;
+        for (int m = 0; m < M_; ++m) {
+            const double threshold = u0 + static_cast<double>(m) / M_;
+            while (j < M_ - 1 && cdf[j] < threshold) ++j;
+            Particle p  = weighted[j];
+            p.weight    = 1.0 / M_;           // reset weight after resampling
+            resampled.push_back(p);
+        }
+
+        return resampled;
     }
 
-    estimate.theta = std::atan2(sin_sum, cos_sum);
-    estimate.weight = 1.0;
-    return estimate;
-  }
+    // ============================================================
+    //  Callbacks
+    // ============================================================
 
-  EigenLikeCovariance estimateCovariance(const Particle& estimate) const
-  {
-    EigenLikeCovariance covariance;
+    // MCL Line 4: sample_motion_model — called on each cmd_vel
+    void cmdVelCallback(const geometry_msgs::msg::Twist::SharedPtr msg)
+    {
+        v_     = msg->linear.x;
+        omega_ = msg->angular.z;
 
-    for (const auto& p : particles_) {
-      const double dx = p.x - estimate.x;
-      const double dy = p.y - estimate.y;
-      const double dtheta = normalizeAngle(p.theta - estimate.theta);
+        const auto now = this->get_clock()->now();
+        const double dt = (now - last_time_).seconds();
+        last_time_ = now;
 
-      covariance.xx += p.weight * dx * dx;
-      covariance.xy += p.weight * dx * dy;
-      covariance.xt += p.weight * dx * dtheta;
-      covariance.yy += p.weight * dy * dy;
-      covariance.yt += p.weight * dy * dtheta;
-      covariance.tt += p.weight * dtheta * dtheta;
+        if (dt <= 0.0 || dt >= 1.0) return;
+
+        // Line 3-4 of MCL (slide 22): propagate each particle through motion model
+        for (auto& p : particles_)
+            p = sampleMotionModel(p, v_, omega_, dt);
     }
 
-    return covariance;
-  }
+    // ============================================================
+    //  Publisher — weighted mean pose + particle cloud
+    // ============================================================
+    void publishEstimate()
+    {
+        // Weighted mean position (after resampling all weights equal 1/M,
+        // so this degenerates to the arithmetic mean)
+        double mx = 0.0, my = 0.0, mcos = 0.0, msin = 0.0;
+        for (const auto& p : particles_) {
+            mx   += p.weight * p.x;
+            my   += p.weight * p.y;
+            mcos += p.weight * std::cos(p.theta);
+            msin += p.weight * std::sin(p.theta);
+        }
+        const double mth = std::atan2(msin, mcos);
 
-  // ============================================================
-  //  Callbacks
-  // ============================================================
+        // Variance from particle spread (used as covariance diagonal)
+        double vx = 0.0, vy = 0.0, vth = 0.0;
+        for (const auto& p : particles_) {
+            vx  += p.weight * (p.x - mx) * (p.x - mx);
+            vy  += p.weight * (p.y - my) * (p.y - my);
+            const double dth = normalizeAngle(p.theta - mth);
+            vth += p.weight * dth * dth;
+        }
 
-  void odomCallback(const nav_msgs::msg::Odometry::SharedPtr msg)
-  {
-    const double odom_x = msg->pose.pose.position.x;
-    const double odom_y = msg->pose.pose.position.y;
-    const double odom_theta = quaternionToYaw(msg->pose.pose.orientation);
+        // PoseWithCovarianceStamped
+        geometry_msgs::msg::PoseWithCovarianceStamped out;
+        out.header.stamp    = this->get_clock()->now();
+        out.header.frame_id = "map";
+        out.pose.pose.position.x = mx;
+        out.pose.pose.position.y = my;
+        out.pose.pose.position.z = 0.0;
+        tf2::Quaternion q;
+        q.setRPY(0.0, 0.0, mth);
+        out.pose.pose.orientation = tf2::toMsg(q);
+        out.pose.covariance.fill(0.0);
+        out.pose.covariance[0]  = vx;
+        out.pose.covariance[7]  = vy;
+        out.pose.covariance[35] = vth;
+        pose_pub_->publish(out);
 
-    if (!have_last_odom_) {
-      last_odom_x_ = odom_x;
-      last_odom_y_ = odom_y;
-      last_odom_theta_ = odom_theta;
-      have_last_odom_ = true;
-
-      initializeParticles(odom_x, odom_y, odom_theta);
-      publishEstimate();
-
-      RCLCPP_INFO(get_logger(),
-                  "PF initialised from odometry: x=%.3f  y=%.3f  theta=%.3f",
-                  odom_x, odom_y, odom_theta);
-      return;
+        // PoseArray for RViz particle visualization
+        geometry_msgs::msg::PoseArray pa;
+        pa.header = out.header;
+        for (const auto& p : particles_) {
+            geometry_msgs::msg::Pose pose;
+            pose.position.x = p.x;
+            pose.position.y = p.y;
+            pose.position.z = 0.0;
+            tf2::Quaternion pq;
+            pq.setRPY(0.0, 0.0, p.theta);
+            pose.orientation = tf2::toMsg(pq);
+            pa.poses.push_back(pose);
+        }
+        particles_pub_->publish(pa);
     }
 
-    const double dx = odom_x - last_odom_x_;
-    const double dy = odom_y - last_odom_y_;
-    const double delta_trans = std::hypot(dx, dy);
-    const double delta_rot1 = normalizeAngle(std::atan2(dy, dx) - last_odom_theta_);
-    const double delta_rot2 = normalizeAngle(odom_theta - last_odom_theta_ - delta_rot1);
+    // ============================================================
+    //  Helpers
+    // ============================================================
 
-    last_odom_x_ = odom_x;
-    last_odom_y_ = odom_y;
-    last_odom_theta_ = odom_theta;
-
-    sampleMotionModel(delta_rot1, delta_trans, delta_rot2);
-    measurementModel();
-    resample();
-    publishEstimate();
-  }
-
-  void imuCallback(const sensor_msgs::msg::Imu::SharedPtr msg)
-  {
-    latest_imu_yaw_ = quaternionToYaw(msg->orientation);
-    have_imu_ = true;
-  }
-
-  void scanCallback(const sensor_msgs::msg::LaserScan::SharedPtr msg)
-  {
-    if (!initialized_) return;
-    latest_scan_ = msg;
-  }
-
-  // ============================================================
-  //  Publisher
-  // ============================================================
-
-  void publishEstimate()
-  {
-    if (!initialized_ || particles_.empty()) return;
-
-    const Particle estimate = estimatePose();
-    const EigenLikeCovariance covariance = estimateCovariance(estimate);
-
-    geometry_msgs::msg::PoseWithCovarianceStamped pose_msg;
-    pose_msg.header.stamp = this->get_clock()->now();
-    pose_msg.header.frame_id = "map";
-    pose_msg.pose.pose.position.x = estimate.x;
-    pose_msg.pose.pose.position.y = estimate.y;
-    pose_msg.pose.pose.position.z = 0.0;
-
-    tf2::Quaternion q;
-    q.setRPY(0.0, 0.0, estimate.theta);
-    pose_msg.pose.pose.orientation = tf2::toMsg(q);
-
-    pose_msg.pose.covariance.fill(0.0);
-    pose_msg.pose.covariance[0] = covariance.xx;
-    pose_msg.pose.covariance[1] = covariance.xy;
-    pose_msg.pose.covariance[5] = covariance.xt;
-    pose_msg.pose.covariance[6] = covariance.xy;
-    pose_msg.pose.covariance[7] = covariance.yy;
-    pose_msg.pose.covariance[11] = covariance.yt;
-    pose_msg.pose.covariance[30] = covariance.xt;
-    pose_msg.pose.covariance[31] = covariance.yt;
-    pose_msg.pose.covariance[35] = covariance.tt;
-
-    pose_pub_->publish(pose_msg);
-
-    geometry_msgs::msg::PoseArray particle_msg;
-    particle_msg.header = pose_msg.header;
-    particle_msg.poses.reserve(particles_.size());
-
-    for (const auto& p : particles_) {
-      geometry_msgs::msg::Pose particle_pose;
-      particle_pose.position.x = p.x;
-      particle_pose.position.y = p.y;
-      particle_pose.position.z = 0.0;
-
-      tf2::Quaternion particle_q;
-      particle_q.setRPY(0.0, 0.0, p.theta);
-      particle_pose.orientation = tf2::toMsg(particle_q);
-
-      particle_msg.poses.push_back(particle_pose);
+    static double normalizeAngle(double a)
+    {
+        while (a >  M_PI) a -= 2.0 * M_PI;
+        while (a < -M_PI) a += 2.0 * M_PI;
+        return a;
     }
 
-    particle_pub_->publish(particle_msg);
-  }
+    // ============================================================
+    //  Members
+    // ============================================================
+    int M_;
+    std::vector<Particle> particles_;      // current particle set X_t
 
-  // ============================================================
-  //  Helpers
-  // ============================================================
+    double map_x_min_, map_x_max_;         // map bounds for uniform init
+    double map_y_min_, map_y_max_;
 
-  double sampleGaussian(double stddev)
-  {
-    if (stddev <= 0.0) return 0.0;
-    std::normal_distribution<double> normal_dist(0.0, stddev);
-    return normal_dist(rng_);
-  }
+    std::array<double, 6> alpha_;          // motion noise params alpha_1..alpha_6
 
-  static double gaussianLikelihood(double error, double stddev)
-  {
-    const double variance = stddev * stddev;
-    if (variance <= 0.0) return 0.0;
-    return std::exp(-0.5 * error * error / variance);
-  }
+    double v_     {0.0};
+    double omega_ {0.0};
+    rclcpp::Time last_time_;
 
-  void normalizeWeights(double weight_sum)
-  {
-    if (weight_sum <= 1e-12 || !std::isfinite(weight_sum)) {
-      setUniformWeights();
-      return;
-    }
+    mutable std::mt19937 gen_;             // mutable: used inside const helpers
 
-    for (auto& p : particles_) {
-      p.weight /= weight_sum;
-    }
-  }
+    rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr   cmd_vel_sub_;
 
-  void setUniformWeights()
-  {
-    if (particles_.empty()) return;
-
-    const double uniform_weight = 1.0 / static_cast<double>(particles_.size());
-    for (auto& p : particles_) {
-      p.weight = uniform_weight;
-    }
-  }
-
-  double quaternionToYaw(const geometry_msgs::msg::Quaternion& q) const
-  {
-    tf2::Quaternion tf_q(q.x, q.y, q.z, q.w);
-    double roll, pitch, yaw;
-    tf2::Matrix3x3(tf_q).getRPY(roll, pitch, yaw);
-    return yaw;
-  }
-
-  static double normalizeAngle(double a)
-  {
-    while (a >  M_PI) a -= 2.0 * M_PI;
-    while (a < -M_PI) a += 2.0 * M_PI;
-    return a;
-  }
-
-  // ============================================================
-  //  Members
-  // ============================================================
-
-  const size_t num_particles_ {500};
-
-  const double init_position_stddev_ {0.20};
-  const double init_yaw_stddev_ {0.15};
-  const double trans_noise_stddev_ {0.10};
-  const double trans_noise_min_stddev_ {0.01};
-  const double rot_noise_stddev_ {0.15};
-  const double rot_noise_min_stddev_ {0.01};
-  const double imu_yaw_stddev_ {0.08};
-
-  std::vector<Particle> particles_;
-  std::mt19937 rng_;
-
-  bool initialized_ {false};
-  bool have_last_odom_ {false};
-  bool have_imu_ {false};
-
-  double last_odom_x_ {0.0};
-  double last_odom_y_ {0.0};
-  double last_odom_theta_ {0.0};
-  double latest_imu_yaw_ {0.0};
-
-  sensor_msgs::msg::LaserScan::SharedPtr latest_scan_;
-
-  rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
-  rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr imu_sub_;
-  rclcpp::Subscription<sensor_msgs::msg::LaserScan>::SharedPtr scan_sub_;
-
-  rclcpp::Publisher<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr pose_pub_;
-  rclcpp::Publisher<geometry_msgs::msg::PoseArray>::SharedPtr particle_pub_;
+    rclcpp::Publisher<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr pose_pub_;
+    rclcpp::Publisher<geometry_msgs::msg::PoseArray>::SharedPtr                 particles_pub_;
+    rclcpp::TimerBase::SharedPtr timer_;
 };
 
 // ============================================================
 //  Entry point
 // ============================================================
-int main(int argc, char ** argv)
+int main(int argc, char* argv[])
 {
-  rclcpp::init(argc, argv);
-  rclcpp::spin(std::make_shared<ParticleFilterNode>());
-  rclcpp::shutdown();
-  return 0;
+    rclcpp::init(argc, argv);
+    rclcpp::spin(std::make_shared<ParticleFilterNode>());
+    rclcpp::shutdown();
+    return 0;
 }

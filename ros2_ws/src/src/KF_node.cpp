@@ -3,8 +3,6 @@
 
 #include <nav_msgs/msg/odometry.hpp>
 #include <sensor_msgs/msg/imu.hpp>
-#include <sensor_msgs/msg/laser_scan.hpp>
-#include <geometry_msgs/msg/twist.hpp>
 #include <geometry_msgs/msg/pose_with_covariance_stamped.hpp>
 
 #include <tf2/LinearMath/Quaternion.h>
@@ -37,33 +35,17 @@ public:
     Sigma_ = Eigen::Matrix3d::Identity() * 1.0;
 
     // ----------------------------------------------------------
-    // Process noise R 
+    // Process noise R
     // ----------------------------------------------------------
     R_ = Eigen::Matrix3d::Zero();
-    R_(0, 0) = 0.05;   
-    R_(1, 1) = 0.05;   
-    R_(2, 2) = 0.01;   
+    R_(0, 0) = 0.05;
+    R_(1, 1) = 0.05;
+    R_(2, 2) = 0.01;
 
     // ----------------------------------------------------------
-    // Measurement noise Q 
+    // Measurement noise Q (IMU yaw)
     // ----------------------------------------------------------
-    Q_odom_ = Eigen::Matrix3d::Zero();
-    Q_odom_(0, 0) = 0.1;   
-    Q_odom_(1, 1) = 0.1;   
-    Q_odom_(2, 2) = 0.05;  
-
-    Q_imu_(0, 0) = 0.02;   
-
-    // ----------------------------------------------------------
-    // Independent Subscribers
-    // ----------------------------------------------------------
-    scan_sub_ = create_subscription<sensor_msgs::msg::LaserScan>(
-      "/scan", 10,
-      std::bind(&KalmanFilterNode::scanCallback, this, std::placeholders::_1));
-
-    cmd_vel_sub_ = create_subscription<geometry_msgs::msg::Twist>(
-      "/cmd_vel", 10,
-      std::bind(&KalmanFilterNode::cmdVelCallback, this, std::placeholders::_1));
+    Q_imu_(0, 0) = 0.02;
 
     // ----------------------------------------------------------
     // Synchronized Subscribers (Odom & IMU)
@@ -89,56 +71,53 @@ public:
       std::chrono::milliseconds(100),
       std::bind(&KalmanFilterNode::publishEstimate, this));
 
-    last_time_ = this->get_clock()->now();
-
     RCLCPP_INFO(get_logger(), "Linear Kalman Filter node started.");
   }
 
 private:
   typedef message_filters::sync_policies::ApproximateTime<
-    nav_msgs::msg::Odometry, 
+    nav_msgs::msg::Odometry,
     sensor_msgs::msg::Imu
   > SyncPolicy;
 
 
   // ============================================================
-  //  Prediction Step (linear KF model from the slides)
+  //  Prediction Step (linear KF, slide 17)
+  //
+  //  Control: u_t = [Δx, Δy, Δθ]  (odometry pose deltas)
+  //  Model:   A = I,  B = I
+  //
+  //  Line 2: mu_bar_t  = A_t * mu_{t-1} + B_t * u_t
+  //  Line 3: Sigma_bar_t = A_t * Sigma_{t-1} * A_t^T + R_t
   // ============================================================
 
-  void predict(double dt)
+  void predict(double delta_x, double delta_y, double delta_theta)
   {
-    // 1. Control vector u_t = [v, omega]^T directly from cmd_vel.
-    Eigen::Vector2d u_t(v_, omega_);
+    const Eigen::Vector3d u_t(delta_x, delta_y, delta_theta);
 
-    // 2. Linear state prediction:
-    //
-    //   mu_t = A_t * mu_{t-1} + B_t * u_t
-    //
-    // This is intentionally linear. It does not rotate the translational
-    // velocity with cos(theta)/sin(theta); that nonlinear model belongs to
-    // the EKF.
-    Eigen::Matrix3d A_t = Eigen::Matrix3d::Identity();
-
-    Eigen::Matrix<double, 3, 2> B_t;
-    B_t << dt, 0.0,
-           0.0, 0.0,
-           0.0, dt;
+    // A = I, B = I  →  mu_bar_t = mu_{t-1} + u_t
+    const Eigen::Matrix3d A_t = Eigen::Matrix3d::Identity();
+    const Eigen::Matrix3d B_t = Eigen::Matrix3d::Identity();
 
     mu_ = A_t * mu_ + B_t * u_t;
     mu_(2) = normalizeAngle(mu_(2));
 
-    // 3. Linear covariance prediction:
-    //
-    //   Sigma_t = A_t * Sigma_{t-1} * A_t^T + R_t
     Sigma_ = A_t * Sigma_ * A_t.transpose() + R_;
   }
+
+  // ============================================================
+  //  Correction Step
+  //
+  //  Line 4: K_t  = Sigma_bar_t * C_t^T * (C_t * Sigma_bar_t * C_t^T + Q_t)^{-1}
+  //  Line 5: mu_t = mu_bar_t + K_t * (z_t - C_t * mu_bar_t)
+  //  Line 6: Sigma_t = (I - K_t * C_t) * Sigma_bar_t
+  // ============================================================
 
   template<int M>
   void correct(const Eigen::Matrix<double, M, 1>& z,
                const Eigen::Matrix<double, M, 3>& C_t,
-               const Eigen::Matrix<double, M, M>& R)
+               const Eigen::Matrix<double, M, M>& Q)
   {
-    // Calculate Innovation
     Eigen::Matrix<double, M, 1> innovation = z - C_t * mu_;
 
     // Handle angle wrap-around for yaw
@@ -148,15 +127,15 @@ private:
       }
     }
 
-    // Line 4: Kalman Gain K_t = \bar{Sigma}_t * C_t^T * (C_t * \bar{Sigma}_t * C_t^T + Measurement Noise)^-1
-    const Eigen::Matrix<double, M, M> S = C_t * Sigma_ * C_t.transpose() + R;
+    // Line 4: Kalman Gain
+    const Eigen::Matrix<double, M, M> S = C_t * Sigma_ * C_t.transpose() + Q;
     const Eigen::Matrix<double, 3, M> K_t = Sigma_ * C_t.transpose() * S.inverse();
 
-    // Line 5: mu_t = \bar{mu}_t + K_t * (z_t - C_t * \bar{mu}_t)
+    // Line 5: correct mean
     mu_ = mu_ + K_t * innovation;
     mu_(2) = normalizeAngle(mu_(2));
 
-    // Line 6: Sigma_t = (I - K_t * C_t) * \bar{Sigma}_t
+    // Line 6: correct covariance
     const Eigen::Matrix3d I = Eigen::Matrix3d::Identity();
     Sigma_ = (I - K_t * C_t) * Sigma_;
   }
@@ -172,45 +151,36 @@ private:
     processImu(imu_msg);
   }
 
-  void cmdVelCallback(const geometry_msgs::msg::Twist::SharedPtr msg)
-  {
-    v_     = msg->linear.x;
-    omega_ = msg->angular.z;
-
-    if (!initialized_) return;
-
-    const auto now = this->get_clock()->now();
-    const double dt = (now - last_time_).seconds();
-    last_time_ = now;
-
-    if (dt > 0.0 && dt < 1.0) { 
-      predict(dt);
-    }
-  }
-
   void processOdom(const nav_msgs::msg::Odometry::ConstSharedPtr& msg)
   {
+    const double x   = msg->pose.pose.position.x;
+    const double y   = msg->pose.pose.position.y;
     const double yaw = quaternionToYaw(msg->pose.pose.orientation);
 
     if (!initialized_) {
-      mu_(0)       = msg->pose.pose.position.x;
-      mu_(1)       = msg->pose.pose.position.y;
-      mu_(2)       = yaw;
-      last_time_   = this->get_clock()->now();
-      initialized_ = true;
+      mu_(0)         = x;
+      mu_(1)         = y;
+      mu_(2)         = yaw;
+      prev_odom_x_   = x;
+      prev_odom_y_   = y;
+      prev_odom_yaw_ = yaw;
+      initialized_   = true;
       RCLCPP_INFO(get_logger(),
                   "KF initialised from odometry: x=%.3f  y=%.3f  theta=%.3f",
                   mu_(0), mu_(1), mu_(2));
       return;
     }
 
-    const Eigen::Vector3d z(msg->pose.pose.position.x,
-                            msg->pose.pose.position.y,
-                            yaw);
+    // Compute pose deltas as control input u_t = [Δx, Δy, Δθ]
+    const double delta_x   = x   - prev_odom_x_;
+    const double delta_y   = y   - prev_odom_y_;
+    const double delta_yaw = normalizeAngle(yaw - prev_odom_yaw_);
 
-    // Measurement Matrix C_t for Odom (maps state [x, y, theta] directly to [x, y, theta])
-    const Eigen::Matrix3d C_t = Eigen::Matrix3d::Identity();
-    correct<3>(z, C_t, Q_odom_);
+    prev_odom_x_   = x;
+    prev_odom_y_   = y;
+    prev_odom_yaw_ = yaw;
+
+    predict(delta_x, delta_y, delta_yaw);
   }
 
   void processImu(const sensor_msgs::msg::Imu::ConstSharedPtr& msg)
@@ -220,17 +190,11 @@ private:
     Eigen::Matrix<double, 1, 1> z;
     z(0, 0) = quaternionToYaw(msg->orientation);
 
-    // Measurement Matrix C_t for IMU (maps state [x, y, theta] to [theta])
+    // C_t maps state [x, y, theta] to measurement [theta]
     Eigen::Matrix<double, 1, 3> C_t;
     C_t << 0.0, 0.0, 1.0;
 
     correct<1>(z, C_t, Q_imu_);
-  }
-
-  void scanCallback(const sensor_msgs::msg::LaserScan::SharedPtr msg)
-  {
-    if (!initialized_) return;
-    (void)msg;   
   }
 
   // ============================================================
@@ -253,15 +217,15 @@ private:
     out.pose.pose.orientation = tf2::toMsg(q);
 
     out.pose.covariance.fill(0.0);
-    out.pose.covariance[0]  = Sigma_(0, 0);   
-    out.pose.covariance[1]  = Sigma_(0, 1);   
-    out.pose.covariance[5]  = Sigma_(0, 2);   
-    out.pose.covariance[6]  = Sigma_(1, 0);   
-    out.pose.covariance[7]  = Sigma_(1, 1);   
-    out.pose.covariance[11] = Sigma_(1, 2);   
-    out.pose.covariance[30] = Sigma_(2, 0);   
-    out.pose.covariance[31] = Sigma_(2, 1);   
-    out.pose.covariance[35] = Sigma_(2, 2);   
+    out.pose.covariance[0]  = Sigma_(0, 0);
+    out.pose.covariance[1]  = Sigma_(0, 1);
+    out.pose.covariance[5]  = Sigma_(0, 2);
+    out.pose.covariance[6]  = Sigma_(1, 0);
+    out.pose.covariance[7]  = Sigma_(1, 1);
+    out.pose.covariance[11] = Sigma_(1, 2);
+    out.pose.covariance[30] = Sigma_(2, 0);
+    out.pose.covariance[31] = Sigma_(2, 1);
+    out.pose.covariance[35] = Sigma_(2, 2);
 
     pose_pub_->publish(out);
   }
@@ -288,25 +252,21 @@ private:
   //  Members
   // ============================================================
 
-  Eigen::Vector3d mu_;                       
-  Eigen::Matrix3d Sigma_;                       
-  Eigen::Matrix3d R_;                       
-  Eigen::Matrix3d Q_odom_;                  
-  Eigen::Matrix<double, 1, 1> Q_imu_;       
+  Eigen::Vector3d mu_;
+  Eigen::Matrix3d Sigma_;
+  Eigen::Matrix3d R_;
+  Eigen::Matrix<double, 1, 1> Q_imu_;
 
-  double v_     {0.0};    
-  double omega_ {0.0};    
+  double prev_odom_x_ = 0.0;
+  double prev_odom_y_ = 0.0;
+  double prev_odom_yaw_ = 0.0;
 
-  rclcpp::Time last_time_;
   bool initialized_ {false};
 
   message_filters::Subscriber<nav_msgs::msg::Odometry> odom_filter_;
-  message_filters::Subscriber<sensor_msgs::msg::Imu> imu_filter_;
+  message_filters::Subscriber<sensor_msgs::msg::Imu>   imu_filter_;
   std::shared_ptr<message_filters::Synchronizer<SyncPolicy>> sync_;
 
-  rclcpp::Subscription<sensor_msgs::msg::LaserScan>::SharedPtr scan_sub_;
-  rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr   cmd_vel_sub_;
-  
   rclcpp::Publisher<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr pose_pub_;
   rclcpp::TimerBase::SharedPtr timer_;
 };

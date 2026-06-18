@@ -63,8 +63,23 @@ def generate_launch_description():
         output='screen'
     )
 
+    # -----------------------------
+    # Eval Node
+    # -----------------------------
+    eval_node = Node(
+        package='turtlebot_state_estimation',
+        executable='eval_node',
+        name='eval_node',
+        output='screen',
+        parameters=[{
+            'ground_truth_topic': '/world/depot/dynamic_pose/info',
+            'ground_truth_index': 1,
+        }]
+    )
+
     return LaunchDescription([
         nav2_launch,
         kf_node,
-        ekf_node
+        ekf_node,
+        eval_node,
     ])

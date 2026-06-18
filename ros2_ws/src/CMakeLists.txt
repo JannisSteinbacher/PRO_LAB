@@ -65,6 +65,12 @@ install(TARGETS
   DESTINATION lib/${PROJECT_NAME}
 )
 
+install(PROGRAMS
+  src/eval_node.py
+  DESTINATION lib/${PROJECT_NAME}
+  RENAME eval_node
+)
+
 install(DIRECTORY
   launch
   rviz

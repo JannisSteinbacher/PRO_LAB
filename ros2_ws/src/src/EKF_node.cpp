@@ -38,7 +38,41 @@
 //      covariance propagation instead of A_t * Sigma * A_t^T
 //    - correct() is structurally identical to the KF but uses H_t
 //      (same role as C_t in the KF) and the Joseph form for Sigma
+//
+//  EKF Localization (landmark correction via scanCallback):
+//    - For each observed landmark i:
+//        delta   = [m_j.x - mu_x, m_j.y - mu_y]   (landmark - robot, map frame)
+//        q       = delta^T * delta
+//        h(.)    = [sqrt(q),  atan2(dy,dx) - theta]   <- nonlinear [range, bearing]
+//        H_t^i   = (1/q) * [[-sqrt(q)*dx, -sqrt(q)*dy,  0],        <- Jacobian
+//                            [         dy,          -dx, -q]]
+//        K       = Sigma_bar * H^T * (H * Sigma_bar * H^T + Q_lm)^-1
+//        mu      = mu_bar + K * (z - h(mu_bar))
+//        Sigma   = (I - K*H) * Sigma_bar * (I - K*H)^T + K*Q_lm*K^T
 // ============================================================
+
+// ------------------------------------------------------------
+//  Landmark definition
+//
+//  A landmark is a known feature in the map with a fixed
+//  world-frame position and an optional integer signature (id).
+//
+//  How to define a good landmark:
+//    - Landmarks must be UNIQUELY IDENTIFIABLE from sensor data
+//      so data association (observed -> map) is unambiguous.
+//    - Choose features that are STABLE over time (poles, pillars,
+//      corner reflectors) — not dynamic objects like furniture.
+//    - Space them so at least 2-3 are ALWAYS VISIBLE for good
+//      observability of x, y, and theta simultaneously.
+//    - Record world positions precisely (survey or SLAM-built map).
+//    - Use 'id' to encode color, reflectance class, or shape so
+//      association can be signature-based rather than nearest-neighbour.
+// ------------------------------------------------------------
+struct Landmark {
+    double x;   // world-frame x  [m]
+    double y;   // world-frame y  [m]
+    int    id;  // signature / class label  (0 = unknown)
+};
 
 class ExtendedKalmanFilterNode : public rclcpp::Node
 {
@@ -73,12 +107,34 @@ public:
 
     Q_imu_(0, 0) = 0.02;
 
+    // Landmark range-bearing noise: [range variance, bearing variance]
+    Q_landmark_ = Eigen::Matrix2d::Zero();
+    Q_landmark_(0, 0) = 0.1;   // range    [m^2]
+    Q_landmark_(1, 1) = 0.05;  // bearing  [rad^2]
+
+    // ----------------------------------------------------------
+    // Map landmarks  (edit to match your physical environment)
+    //
+    // Rules for good placement:
+    //   - At least 3 landmarks, not collinear
+    //   - Spread around the expected robot workspace
+    //   - Each landmark visible from multiple robot poses
+    // ----------------------------------------------------------
+    map_landmarks_ = {
+      { 1.0,  1.0, 1},
+      { 1.0, -1.0, 2},
+      {-1.0,  0.0, 3},
+    };
+
+    // Reject scan hit <-> map landmark pairs further apart than this [m]
+    association_threshold_ = 0.5;
+
     // ----------------------------------------------------------
     // Independent Subscribers
     // ----------------------------------------------------------
-    scan_sub_ = create_subscription<sensor_msgs::msg::LaserScan>(
+    /*scan_sub_ = create_subscription<sensor_msgs::msg::LaserScan>(
       "/scan", 10,
-      std::bind(&ExtendedKalmanFilterNode::scanCallback, this, std::placeholders::_1));
+      std::bind(&ExtendedKalmanFilterNode::scanCallback, this, std::placeholders::_1));*/
 
     cmd_vel_sub_ = create_subscription<geometry_msgs::msg::Twist>(
       "/cmd_vel", 10,
@@ -201,6 +257,98 @@ private:
     Sigma_ = I_KH * Sigma_ * I_KH.transpose() + K_t * Q * K_t.transpose();
   }
 
+  // ----------------------------------------------------------
+  // correctLandmark()  —  EKF correction for one landmark observation.
+  //
+  // Uses the NONLINEAR measurement function h(mu_bar, m_j) and its
+  // Jacobian H_t^i (Thrun 2006, EKF_localization):
+  //
+  //   delta = [m_j.x - mu_x,  m_j.y - mu_y]
+  //   q     = delta^T * delta
+  //   h(.)  = [sqrt(q),  atan2(dy, dx) - theta]   <- [range, bearing]
+  //
+  //   H_t^i = (1/q) * [[-sqrt(q)*dx, -sqrt(q)*dy,  0],
+  //                     [         dy,          -dx, -q]]
+  // ----------------------------------------------------------
+
+  /*void correctLandmark(double z_range, double z_bearing, const Landmark& lm)
+  {
+    const double dx = lm.x - mu_(0);
+    const double dy = lm.y - mu_(1);
+    const double q  = dx * dx + dy * dy;
+    const double r  = std::sqrt(q);
+
+    if (r < 1e-6) return; // singularity guard
+
+    // Expected measurement  h(mu_bar, m_j)
+    Eigen::Vector2d z_hat;
+    z_hat(0) = r;
+    z_hat(1) = normalizeAngle(std::atan2(dy, dx) - mu_(2));
+
+    // Actual observation
+    Eigen::Vector2d z_obs;
+    z_obs(0) = z_range;
+    z_obs(1) = normalizeAngle(z_bearing);
+
+    // Innovation  (bearing always normalized)
+    Eigen::Vector2d innovation;
+    innovation(0) = z_obs(0) - z_hat(0);
+    innovation(1) = normalizeAngle(z_obs(1) - z_hat(1));
+
+    // Jacobian H_t^i  (2 x 3)
+    Eigen::Matrix<double, 2, 3> H;
+    H << -dx / r,  -dy / r,   0.0,
+          dy / q,  -dx / q,  -1.0;
+
+    // Kalman gain  (Line 4)
+    const Eigen::Matrix2d S = H * Sigma_ * H.transpose() + Q_landmark_;
+    const Eigen::Matrix<double, 3, 2> K = Sigma_ * H.transpose() * S.inverse();
+
+    // State update  (Line 5)
+    mu_ += K * innovation;
+    mu_(2) = normalizeAngle(mu_(2));
+
+    // Covariance update  (Line 6, Joseph form)
+    const Eigen::Matrix3d I_KH = Eigen::Matrix3d::Identity() - K * H;
+    Sigma_ = I_KH * Sigma_ * I_KH.transpose() + K * Q_landmark_ * K.transpose();
+  }
+
+  // ----------------------------------------------------------
+  // detectPoles()
+  //
+  // Finds pole-like landmarks in a LaserScan by locating range
+  // local minima that are significantly closer than both neighbours
+  // (an isolated pole appears as a dip in the range profile).
+  //
+  // Returns (range [m], bearing [rad]) in the robot frame.
+  // jump_threshold: minimum step [m] to call a point a pole tip.
+  // ----------------------------------------------------------
+  std::vector<std::pair<double, double>>
+  detectPoles(const sensor_msgs::msg::LaserScan::SharedPtr& scan,
+              float jump_threshold = 0.25f)
+  {
+    std::vector<std::pair<double, double>> poles;
+    const int N = static_cast<int>(scan->ranges.size());
+
+    auto valid = [&](int i) {
+      const float r = scan->ranges[i];
+      return std::isfinite(r) && r >= scan->range_min && r <= scan->range_max;
+    };
+
+    for (int i = 1; i < N - 1; ++i) {
+      if (!valid(i - 1) || !valid(i) || !valid(i + 1)) continue;
+      const float r_prev = scan->ranges[i - 1];
+      const float r_curr = scan->ranges[i];
+      const float r_next = scan->ranges[i + 1];
+
+      if (r_curr < r_prev - jump_threshold && r_curr < r_next - jump_threshold) {
+        const double bearing = scan->angle_min + i * scan->angle_increment;
+        poles.emplace_back(static_cast<double>(r_curr), bearing);
+      }
+    }
+    return poles;
+  }*/
+
   // ============================================================
   //  Callbacks
   // ============================================================
@@ -267,11 +415,43 @@ private:
     correct<1>(z, H_t, Q_imu_);
   }
 
-  void scanCallback(const sensor_msgs::msg::LaserScan::SharedPtr msg)
+  // ----------------------------------------------------------
+  // scanCallback  —  EKF localization with landmarks
+  //
+  // For each scan frame:
+  //   1. Detect pole candidates  (robot frame: range, bearing)
+  //   2. Project each pole into the map frame using current mu_
+  //   3. Associate with nearest map landmark within threshold
+  //   4. Run correctLandmark() for each accepted association
+  // ----------------------------------------------------------
+  
+  /*void scanCallback(const sensor_msgs::msg::LaserScan::SharedPtr msg)
   {
     if (!initialized_) return;
-    (void)msg;
-  }
+
+    for (const auto& [range, bearing] : detectPoles(msg)) {
+      // Project scan hit into map frame
+      const double obs_x = mu_(0) + range * std::cos(mu_(2) + bearing);
+      const double obs_y = mu_(1) + range * std::sin(mu_(2) + bearing);
+
+      // Nearest-neighbour data association
+      const Landmark* match = nullptr;
+      double best_dist = association_threshold_;
+      for (const auto& lm : map_landmarks_) {
+        const double dx   = lm.x - obs_x;
+        const double dy   = lm.y - obs_y;
+        const double dist = std::sqrt(dx * dx + dy * dy);
+        if (dist < best_dist) {
+          best_dist = dist;
+          match     = &lm;
+        }
+      }
+
+      if (match == nullptr) continue;
+
+      correctLandmark(range, bearing, *match);
+    }
+  }*/
 
   // ============================================================
   //  Publisher
@@ -333,6 +513,9 @@ private:
   Eigen::Matrix3d R_;                       // Process noise (predict step, Line 3)
   Eigen::Matrix3d Q_odom_;                  // Odometry measurement noise (correct step, Line 4)
   Eigen::Matrix<double, 1, 1> Q_imu_;      // IMU measurement noise     (correct step, Line 4)
+  Eigen::Matrix2d Q_landmark_;             // Landmark [range, bearing] noise
+  std::vector<Landmark> map_landmarks_;    // Known landmark positions in map frame
+  double association_threshold_;           // Max map-projection error [m] for association
 
   double v_     {0.0};   // Linear  velocity from /cmd_vel
   double omega_ {0.0};   // Angular velocity from /cmd_vel
