@@ -75,6 +75,8 @@ install(DIRECTORY
   launch
   rviz
   config
+  worlds
+  models
   DESTINATION share/${PROJECT_NAME}
 )
 

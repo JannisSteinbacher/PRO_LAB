@@ -1,0 +1,19 @@
+<?xml version="1.0"?>
+<sdf version="1.6">
+  <model name="apriltag36h11_4">
+    <static>true</static>
+    <link name="link">
+      <!-- Textured quad mesh (real UVs + classic material) so the tag image shows.
+           Double-sided; the back face shows a mirrored copy. -->
+      <visual name="tag">
+        <geometry>
+          <mesh><uri>tag.obj</uri></mesh>
+        </geometry>
+      </visual>
+      <!-- Thin collision box matching the 0.2 m tag. -->
+      <collision name="col">
+        <geometry><box><size>0.005 0.2 0.2</size></box></geometry>
+      </collision>
+    </link>
+  </model>
+</sdf>

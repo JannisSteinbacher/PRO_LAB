@@ -1,0 +1,18 @@
+# AprilTag quad (0.2 m), normal along +/-X
+mtllib tag.mtl
+o tag
+v 0 -0.1 -0.1
+v 0  0.1 -0.1
+v 0  0.1  0.1
+v 0 -0.1  0.1
+vt 0 0
+vt 1 0
+vt 1 1
+vt 0 1
+vn  1 0 0
+vn -1 0 0
+usemtl tagmat
+f 1/1/1 2/2/1 3/3/1
+f 1/1/1 3/3/1 4/4/1
+f 1/1/2 3/3/2 2/2/2
+f 1/1/2 4/4/2 3/3/2

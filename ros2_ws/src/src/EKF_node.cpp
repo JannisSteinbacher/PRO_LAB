@@ -1,4 +1,6 @@
 #include <cmath>
+#include <string>
+#include <vector>
 #include <rclcpp/rclcpp.hpp>
 
 #include <nav_msgs/msg/odometry.hpp>
@@ -90,27 +92,22 @@ public:
     Sigma_ = Eigen::Matrix3d::Identity() * 1.0;
 
     // ----------------------------------------------------------
-    // Process noise R  (added to covariance in predict step, Line 3)
+    // Noise matrices loaded from parameters (see config/filter_params.yaml).
+    // Hardcoded values below are fallback defaults if no YAML is supplied.
+    //   R      : process noise         (predict step, Line 3)
+    //   Q_odom : odom pose meas. noise (correct step, Line 4)
+    //   Q_imu  : IMU yaw meas. noise   (correct step, Line 4)
+    //   Q_landmark : [range, bearing] landmark meas. noise
     // ----------------------------------------------------------
-    R_ = Eigen::Matrix3d::Zero();
-    R_(0, 0) = 0.05;
-    R_(1, 1) = 0.05;
-    R_(2, 2) = 0.01;
+    R_      = diagMatrix3FromParam("R_diag",      {0.05, 0.05, 0.01});
+    Q_odom_ = diagMatrix3FromParam("Q_odom_diag", {0.1, 0.1, 0.05});
+    Q_imu_(0, 0) = declare_parameter<double>("Q_imu", 0.02);
 
-    // ----------------------------------------------------------
-    // Measurement noise Q
-    // ----------------------------------------------------------
-    Q_odom_ = Eigen::Matrix3d::Zero();
-    Q_odom_(0, 0) = 0.1;
-    Q_odom_(1, 1) = 0.1;
-    Q_odom_(2, 2) = 0.05;
-
-    Q_imu_(0, 0) = 0.02;
-
-    // Landmark range-bearing noise: [range variance, bearing variance]
+    const std::vector<double> q_lm =
+      declare_parameter<std::vector<double>>("Q_landmark_diag", {0.1, 0.05});
     Q_landmark_ = Eigen::Matrix2d::Zero();
-    Q_landmark_(0, 0) = 0.1;   // range    [m^2]
-    Q_landmark_(1, 1) = 0.05;  // bearing  [rad^2]
+    Q_landmark_(0, 0) = q_lm.size() > 0 ? q_lm[0] : 0.1;   // range   [m^2]
+    Q_landmark_(1, 1) = q_lm.size() > 1 ? q_lm[1] : 0.05;  // bearing [rad^2]
 
     // ----------------------------------------------------------
     // Map landmarks  (edit to match your physical environment)
@@ -489,6 +486,24 @@ private:
   // ============================================================
   //  Helpers
   // ============================================================
+  // Declare a [d0, d1, d2] parameter and build a 3x3 diagonal noise matrix.
+  Eigen::Matrix3d diagMatrix3FromParam(const std::string& name,
+                                       const std::vector<double>& def)
+  {
+    std::vector<double> v = declare_parameter<std::vector<double>>(name, def);
+    if (v.size() != 3) {
+      RCLCPP_WARN(get_logger(),
+                  "Parameter '%s' must have 3 elements; falling back to defaults.",
+                  name.c_str());
+      v = def;
+    }
+    Eigen::Matrix3d m = Eigen::Matrix3d::Zero();
+    m(0, 0) = v[0];
+    m(1, 1) = v[1];
+    m(2, 2) = v[2];
+    return m;
+  }
+
   double quaternionToYaw(const geometry_msgs::msg::Quaternion& q) const
   {
     tf2::Quaternion tf_q(q.x, q.y, q.z, q.w);

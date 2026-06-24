@@ -1,0 +1,32 @@
+# ============================================================
+#  Central noise tuning for all state-estimation filters
+#
+#  Convention (Thrun, Probabilistic Robotics):
+#    R = PROCESS / motion noise     -> used in the PREDICT step
+#    Q = MEASUREMENT / sensor noise -> used in the CORRECT step
+#
+#  The '/**' wildcard applies these values to EVERY node that is
+#  given this file (kf_node and ekf_node), so both filters are tuned
+#  from one place and compared on identical noise assumptions.
+#
+#  To tune one filter independently, add a node-specific block, e.g.
+#
+#    kf_node:
+#      ros__parameters:
+#        R_diag: [0.1, 0.1, 0.02]
+#
+#  A node-specific value overrides the matching '/**' value.
+# ============================================================
+/**:
+  ros__parameters:
+    # --- Process noise R : diagonal [x, y, theta]  (predict step) ---
+    R_diag: [0.02, 0.02, 0.01]
+
+    # --- Measurement noise Q : odom full pose [x, y, theta]  (correct step) ---
+    Q_odom_diag: [2, 2, 1]
+
+    # --- Measurement noise Q : IMU yaw [theta]  (correct step) ---
+    Q_imu: 2
+
+    # --- Measurement noise Q : landmark [range, bearing]  (EKF landmark correction) ---
+    Q_landmark_diag: [0.1, 0.05]

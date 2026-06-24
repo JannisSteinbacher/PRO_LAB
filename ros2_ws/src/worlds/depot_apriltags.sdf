@@ -1,0 +1,80 @@
+<?xml version="1.0"?>
+<sdf version="1.6" xmlns:xacro="http://www.ros.org/wiki/xacro" xmlns:experimental="http://sdformat.org/schemas/experimental">
+  <xacro:arg name="headless" default="true"/>
+  <world name="depot">
+    <scene>
+      <grid>false</grid>
+    </scene>
+    <physics name="1ms" type="ode">
+      <max_step_size>0.003</max_step_size>
+      <real_time_update_rate>1000.0</real_time_update_rate>
+      <real_time_factor>1.0</real_time_factor>
+    </physics>
+
+    <plugin
+      filename="gz-sim-physics-system"
+      name="gz::sim::systems::Physics">
+    </plugin>
+    <plugin
+      filename="gz-sim-user-commands-system"
+      name="gz::sim::systems::UserCommands">
+    </plugin>
+  <xacro:unless value="$(arg headless)">
+    <plugin
+      filename="gz-sim-scene-broadcaster-system"
+      name="gz::sim::systems::SceneBroadcaster">
+    </plugin>
+  </xacro:unless>
+    <plugin
+      filename="gz-sim-sensors-system"
+      name="gz::sim::systems::Sensors">
+      <render_engine>ogre2</render_engine>
+    </plugin>
+    <plugin
+      filename="gz-sim-imu-system"
+      name="gz::sim::systems::Imu">
+    </plugin>
+
+    <include>
+      <uri>
+        https://fuel.gazebosim.org/1.0/OpenRobotics/models/Depot
+      </uri>
+
+      <experimental:params>
+        <visual element_id="Fan1::visual" action="remove"/>
+        <visual element_id="Fan2::visual" action="remove"/>
+        <visual element_id="main::ROOF_visual" action="remove"/>
+        <visual element_id="main::FANS_visual" action="remove"/>
+      </experimental:params>
+
+    </include>
+
+    <!-- Add apriltags to the depot world -->
+    <include>
+      <name>apriltag_0</name>
+      <uri>model://apriltag36h11_0</uri>
+      <pose>-7.307 3.6816 0.1859 0 0 0</pose>
+    </include>
+    <include>
+      <name>apriltag_1</name>
+      <uri>model://apriltag36h11_1</uri>
+      <pose>-0.9047 4.5724 0.3 0 0 0.3454</pose>
+    </include>
+    <include>
+      <name>apriltag_2</name>
+      <uri>model://apriltag36h11_2</uri>
+      <pose>-15.0213 2.811 0.3 0 0 0</pose>
+    </include>
+    <include>
+      <name>apriltag_3</name>
+      <uri>model://apriltag36h11_3</uri>
+      <pose>-7.66 -3.654 0.3 0 0 1.5708</pose>
+    </include>
+    <include>
+      <name>apriltag_4</name>
+      <uri>model://apriltag36h11_4</uri>
+      <pose>-1.589 3.5964 0.3 0 0 -2.8253</pose>
+    </include>
+
+  </world>
+</sdf>

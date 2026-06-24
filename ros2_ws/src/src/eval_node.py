@@ -48,10 +48,14 @@ class EvalNode(Node):
         self.declare_parameter('ground_truth_topic', '/world/depot/dynamic_pose/info')
         # Index of turtlebot4 in the Pose_V array (confirmed via gz topic echo).
         self.declare_parameter('ground_truth_index', 1)
+        # Set false to collect data but skip writing the PNG on shutdown.
+        self.declare_parameter('save_plots', True)
         gt_topic = (self.get_parameter('ground_truth_topic')
                     .get_parameter_value().string_value)
         self._gt_index = (self.get_parameter('ground_truth_index')
                           .get_parameter_value().integer_value)
+        self._save_plots = (self.get_parameter('save_plots')
+                            .get_parameter_value().bool_value)
 
         # Each list stores tuples; converted to np.array on shutdown.
         # GT:      (t, x, y, yaw)
@@ -123,6 +127,11 @@ class EvalNode(Node):
     # ------------------------------------------------------------------ #
 
     def generate_plots(self):
+        if not self._save_plots:
+            self.get_logger().info(
+                'save_plots=false — skipping evaluation PNG.')
+            return
+
         gt  = np.array(self._gt)  if self._gt  else None
         kf  = np.array(self._kf)  if self._kf  else None
         ekf = np.array(self._ekf) if self._ekf else None
