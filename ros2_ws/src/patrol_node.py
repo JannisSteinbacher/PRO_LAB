@@ -55,10 +55,10 @@ def main(args=None):
 
     # 3. Define the Waypoints (Adjust these to fit your example map!)
     # create_waypoint(navigator, x_meters, y_meters, yaw_degrees)
-    wp1 = create_waypoint(navigator, 6.45, 1.24, 0.0)
-    wp2 = create_waypoint(navigator, 11.91, 3.94, 90.0)
-    wp3 = create_waypoint(navigator, 0.66, 5.39, 180.0)
-    wp4 = create_waypoint(navigator, -4.27, 2.02, -90.0)
+    wp1 = create_waypoint(navigator, 5.2, 3.58, 0.0)
+    wp2 = create_waypoint(navigator, 8.25, 5.166, 180.0)
+    wp3 = create_waypoint(navigator, -6.11, 2.625, 180.0)
+    wp4 = create_waypoint(navigator, 1.26, 0.78, 0.0)
 
     # Put them in a list
     route = [wp1, wp2, wp3, wp4]

@@ -19,14 +19,36 @@
 # ============================================================
 /**:
   ros__parameters:
+    # NOTE: R/Q are required (no in-code defaults) and strictly typed as
+    # doubles — always write a decimal point, e.g. 200.0 not 200, or the node
+    # rejects the value as an integer.
     # --- Process noise R : diagonal [x, y, theta]  (predict step) ---
-    R_diag: [0.02, 0.02, 0.01]
+    R_diag: [0.001, 0.001, 0.001]
 
     # --- Measurement noise Q : odom full pose [x, y, theta]  (correct step) ---
-    Q_odom_diag: [2, 2, 1]
+    #Q_odom_diag: [200.0, 200.0, 100.0]
 
     # --- Measurement noise Q : IMU yaw [theta]  (correct step) ---
-    Q_imu: 2
+    Q_imu: 0.05
 
     # --- Measurement noise Q : landmark [range, bearing]  (EKF landmark correction) ---
     Q_landmark_diag: [0.1, 0.05]
+
+    # ============================================================
+    #  AprilTag landmark map  (EKF localization, Thrun slide 25)
+    #
+    #  Tag world positions match the Gazebo world (depot_apriltags.sdf).
+    #  'map_origin' is the robot's spawn pose in that world frame; the EKF
+    #  shifts every landmark into its odom frame (state starts at 0,0 there):
+    #      lm = R(-yaw0) * (world_xy - origin_xy)
+    #
+    #  landmark_ids[i] is the AprilTag id (signature) used for known
+    #  correspondence — it must match the tag the detector reports.
+    #  Edit these together if you move/retag the landmarks or change the spawn.
+    # ============================================================
+    landmark_ids:     [0,      1,       2,        3,      4]
+    landmark_world_x: [-7.307, -0.9047, -15.0213, -7.66,  -1.589]
+    landmark_world_y: [3.6816, 4.5724,  2.811,    -3.654, 3.5964]
+
+    # Robot spawn pose in the world frame [x, y, yaw]  (nav2 tb4 depot default).
+    map_origin: [-8.0, 0.0, 0.0]

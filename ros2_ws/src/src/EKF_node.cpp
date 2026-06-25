@@ -1,13 +1,14 @@
+#include <algorithm>
 #include <cmath>
+#include <stdexcept>
 #include <string>
 #include <vector>
 #include <rclcpp/rclcpp.hpp>
 
 #include <nav_msgs/msg/odometry.hpp>
 #include <sensor_msgs/msg/imu.hpp>
-#include <sensor_msgs/msg/laser_scan.hpp>
-#include <geometry_msgs/msg/twist.hpp>
 #include <geometry_msgs/msg/pose_with_covariance_stamped.hpp>
+#include <visualization_msgs/msg/marker_array.hpp>
 
 #include <tf2/LinearMath/Quaternion.h>
 #include <tf2/LinearMath/Matrix3x3.h>
@@ -24,9 +25,20 @@
 //
 //  Follows the EKF algorithm (Thrun, 2006):
 //
-//  Predict  (nonlinear motion model g(.)):
+//  Predict  (nonlinear odometry motion model g(.)):
 //    Line 2:  mu_bar_t  = g(u_t, mu_{t-1})
 //    Line 3:  Sig_bar_t = G_t * Sigma_{t-1} * G_t^T + R_t
+//
+//    The motion input u_t is the INCREMENTAL pose change reported by /odom
+//    (the delta between two consecutive odom messages), decomposed into
+//    rot1 / trans / rot2 and re-applied from the filter's CURRENT pose.
+//    We deliberately use only the odometry *increment*, never its absolute
+//    pose: raw odometry drifts, so feeding its absolute pose back in as a
+//    measurement would continuously drag the estimate onto the drifted track
+//    and undo every landmark fix the moment a tag leaves view. Landmarks
+//    (and IMU yaw) are therefore the ONLY absolute corrections — once a tag
+//    snaps the pose, the next odom increments build forward from that
+//    corrected anchor instead of snapping back to where odom thinks it is.
 //
 //  Correct  (linear measurement model via H_t):
 //    Line 4:  K_t       = Sig_bar_t * H_t^T * (H_t * Sig_bar_t * H_t^T + Q_t)^-1
@@ -41,8 +53,16 @@
 //    - correct() is structurally identical to the KF but uses H_t
 //      (same role as C_t in the KF) and the Joseph form for Sigma
 //
-//  EKF Localization (landmark correction via scanCallback):
+//  EKF Localization with AprilTag landmarks (aprilTagCallback):
+//    Implements EKF_localization_known_correspondences (Thrun 2006, slide 25).
+//    The TurtleBot4 camera feed is processed by apriltag_detector_node, which
+//    publishes each visible tag's position in the robot (base_link) frame on
+//    /apriltag/detections (visualization_msgs/MarkerArray, marker.id = tag id).
+//
+//    - Known correspondence: the AprilTag id IS the landmark signature, so each
+//      detection maps unambiguously to one map landmark (no nearest-neighbour).
 //    - For each observed landmark i:
+//        z       = [range, bearing] from the detection (robot frame)
 //        delta   = [m_j.x - mu_x, m_j.y - mu_y]   (landmark - robot, map frame)
 //        q       = delta^T * delta
 //        h(.)    = [sqrt(q),  atan2(dy,dx) - theta]   <- nonlinear [range, bearing]
@@ -51,6 +71,11 @@
 //        K       = Sigma_bar * H^T * (H * Sigma_bar * H^T + Q_lm)^-1
 //        mu      = mu_bar + K * (z - h(mu_bar))
 //        Sigma   = (I - K*H) * Sigma_bar * (I - K*H)^T + K*Q_lm*K^T
+//
+//    Frame note: the filter state lives in the spawn-relative 'odom' frame
+//    (mu starts at 0,0 where the robot spawns), while the AprilTag world
+//    positions come from the Gazebo world frame. The map is therefore shifted
+//    by the spawn pose 'map_origin' so landmarks and state share one frame.
 // ============================================================
 
 // ------------------------------------------------------------
@@ -89,56 +114,90 @@ public:
     // ----------------------------------------------------------
     // Initial state covariance Sigma (high uncertainty at start)
     // ----------------------------------------------------------
-    Sigma_ = Eigen::Matrix3d::Identity() * 1.0;
+    Sigma_ = Eigen::Matrix3d::Identity() * 0.2;
 
     // ----------------------------------------------------------
-    // Noise matrices loaded from parameters (see config/filter_params.yaml).
-    // Hardcoded values below are fallback defaults if no YAML is supplied.
-    //   R      : process noise         (predict step, Line 3)
-    //   Q_odom : odom pose meas. noise (correct step, Line 4)
+    // Noise matrices — loaded ONLY from parameters (config/filter_params.yaml).
+    // These are required: there are no in-code defaults, so if the YAML is not
+    // supplied the node fails to start. That guarantees the tuning always comes
+    // from filter_params.yaml (single source of truth).
+    //   R      : process noise         (predict step, Line 3 — odom motion)
     //   Q_imu  : IMU yaw meas. noise   (correct step, Line 4)
     //   Q_landmark : [range, bearing] landmark meas. noise
-    // ----------------------------------------------------------
-    R_      = diagMatrix3FromParam("R_diag",      {0.05, 0.05, 0.01});
-    Q_odom_ = diagMatrix3FromParam("Q_odom_diag", {0.1, 0.1, 0.05});
-    Q_imu_(0, 0) = declare_parameter<double>("Q_imu", 0.02);
-
-    const std::vector<double> q_lm =
-      declare_parameter<std::vector<double>>("Q_landmark_diag", {0.1, 0.05});
-    Q_landmark_ = Eigen::Matrix2d::Zero();
-    Q_landmark_(0, 0) = q_lm.size() > 0 ? q_lm[0] : 0.1;   // range   [m^2]
-    Q_landmark_(1, 1) = q_lm.size() > 1 ? q_lm[1] : 0.05;  // bearing [rad^2]
-
-    // ----------------------------------------------------------
-    // Map landmarks  (edit to match your physical environment)
     //
-    // Rules for good placement:
-    //   - At least 3 landmarks, not collinear
-    //   - Spread around the expected robot workspace
-    //   - Each landmark visible from multiple robot poses
+    // Note: there is no Q_odom here. Odometry is the motion INPUT to predict(),
+    // not a correction, so it has no measurement-noise matrix. (The shared
+    // filter_params.yaml still defines Q_odom_diag for the linear KF node.)
     // ----------------------------------------------------------
-    map_landmarks_ = {
-      { 1.0,  1.0, 1},
-      { 1.0, -1.0, 2},
-      {-1.0,  0.0, 3},
-    };
+    R_      = diagMatrix3FromParam("R_diag");
 
-    // Reject scan hit <-> map landmark pairs further apart than this [m]
-    association_threshold_ = 0.5;
+    declare_parameter("Q_imu", rclcpp::PARAMETER_DOUBLE);
+    Q_imu_(0, 0) = get_parameter("Q_imu").as_double();
+
+    declare_parameter("Q_landmark_diag", rclcpp::PARAMETER_DOUBLE_ARRAY);
+    const std::vector<double> q_lm = get_parameter("Q_landmark_diag").as_double_array();
+    if (q_lm.size() != 2) {
+      throw std::runtime_error("Parameter 'Q_landmark_diag' must have exactly 2 "
+                               "elements [range, bearing].");
+    }
+    Q_landmark_ = Eigen::Matrix2d::Zero();
+    Q_landmark_(0, 0) = q_lm[0];   // range   [m^2]
+    Q_landmark_(1, 1) = q_lm[1];   // bearing [rad^2]
+
+    // ----------------------------------------------------------
+    // AprilTag landmark map.
+    //
+    // The tag world positions (parameters below) match the Gazebo world SDF
+    // (depot_apriltags.sdf). 'map_origin' is the robot spawn pose in that world
+    // frame; each landmark is rotated/translated into the filter's odom frame:
+    //
+    //   delta = (world_xy - origin_xy)
+    //   lm    = R(-yaw0) * delta            (R(-yaw0) = [[c, s], [-s, c]])
+    //
+    // The signature 'id' equals the AprilTag id, giving known correspondence.
+    // Defaults are the 5 tags in depot_apriltags.sdf with spawn pose (-8, 0, 0).
+    // ----------------------------------------------------------
+    const std::vector<int64_t> ids =
+      declare_parameter<std::vector<int64_t>>("landmark_ids", {0, 1, 2, 3, 4});
+    const std::vector<double> wx = declare_parameter<std::vector<double>>(
+      "landmark_world_x", {-7.307, -0.9047, -15.0213, -7.66, -1.589});
+    const std::vector<double> wy = declare_parameter<std::vector<double>>(
+      "landmark_world_y", {3.6816, 4.5724, 2.811, -3.654, 3.5964});
+    const std::vector<double> origin =
+      declare_parameter<std::vector<double>>("map_origin", {-8.0, 0.0, 0.0});
+
+    const double x0 = origin.size() > 0 ? origin[0] : 0.0;
+    const double y0 = origin.size() > 1 ? origin[1] : 0.0;
+    const double yaw0 = origin.size() > 2 ? origin[2] : 0.0;
+    const double c = std::cos(yaw0), s = std::sin(yaw0);
+
+    map_landmarks_.clear();
+    const size_t n = std::min(ids.size(), std::min(wx.size(), wy.size()));
+    for (size_t i = 0; i < n; ++i) {
+      const double dx = wx[i] - x0;
+      const double dy = wy[i] - y0;
+      Landmark lm;
+      lm.x  =  c * dx + s * dy;   // world -> odom frame
+      lm.y  = -s * dx + c * dy;
+      lm.id = static_cast<int>(ids[i]);
+      map_landmarks_.push_back(lm);
+      RCLCPP_INFO(get_logger(),
+                  "Landmark id=%d  world(%.3f, %.3f) -> odom(%.3f, %.3f)",
+                  lm.id, wx[i], wy[i], lm.x, lm.y);
+    }
 
     // ----------------------------------------------------------
     // Independent Subscribers
     // ----------------------------------------------------------
-    /*scan_sub_ = create_subscription<sensor_msgs::msg::LaserScan>(
-      "/scan", 10,
-      std::bind(&ExtendedKalmanFilterNode::scanCallback, this, std::placeholders::_1));*/
-
-    cmd_vel_sub_ = create_subscription<geometry_msgs::msg::Twist>(
-      "/cmd_vel", 10,
-      std::bind(&ExtendedKalmanFilterNode::cmdVelCallback, this, std::placeholders::_1));
+    apriltag_sub_ = create_subscription<visualization_msgs::msg::MarkerArray>(
+      "/apriltag/detections", 10,
+      std::bind(&ExtendedKalmanFilterNode::aprilTagCallback, this, std::placeholders::_1));
 
     // ----------------------------------------------------------
     // Synchronized Subscribers (Odom & IMU)
+    //   /odom drives the PREDICT step (odometry motion model, relative
+    //   increments); /imu drives a yaw CORRECTION. They are synchronized so
+    //   each cycle predicts then corrects in the proper EKF order.
     // ----------------------------------------------------------
     odom_filter_.subscribe(this, "/odom");
     imu_filter_.subscribe(this, "/imu");
@@ -161,8 +220,6 @@ public:
       std::chrono::milliseconds(100),
       std::bind(&ExtendedKalmanFilterNode::publishEstimate, this));
 
-    last_time_ = this->get_clock()->now();
-
     RCLCPP_INFO(get_logger(), "Extended Kalman Filter node started.");
   }
 
@@ -177,41 +234,45 @@ private:
   //  EKF Core Algorithm
   // ============================================================
 
-  void predict(double dt)
+  // predict()  —  Lines 2-3 of the EKF, driven by the ODOMETRY motion model.
+  //
+  // Instead of integrating a commanded velocity, the motion input u_t is the
+  // pose INCREMENT reported by /odom between the previous and current message.
+  // The increment is decomposed (Thrun's odometry motion model) into
+  //   rot1  : initial turn toward the direction of travel
+  //   trans : straight-line distance travelled
+  //   rot2  : final turn to the new heading
+  // and then re-applied starting from the filter's CURRENT pose mu_. This is
+  // the whole point of the fix: we consume only the odom *delta*, never its
+  // absolute (drifting) pose, so any landmark correction already baked into
+  // mu_ is preserved and the next motion builds forward from that anchor.
+  void predict(double rot1, double trans, double rot2)
   {
-    const double theta = mu_(2);
-
     // -------------------------------------------------------
     // Line 2: mu_bar_t = g(u_t, mu_{t-1})
     //
-    // Nonlinear motion model g(.) for a differential-drive robot
-    // (slide 37):
-    //   x_t     = x_{t-1}     + v * cos(theta_{t-1}) * dt
-    //   y_t     = y_{t-1}     + v * sin(theta_{t-1}) * dt
-    //   theta_t = theta_{t-1} + omega * dt
-    //
-    // This replaces the linear  A_t * mu + B_t * u  of the KF.
+    //   heading = theta_{t-1} + rot1   (direction of travel in the filter frame)
+    //   x_t     = x_{t-1}     + trans * cos(heading)
+    //   y_t     = y_{t-1}     + trans * sin(heading)
+    //   theta_t = theta_{t-1} + rot1 + rot2
     // -------------------------------------------------------
-    mu_(0) += v_ * std::cos(theta) * dt;
-    mu_(1) += v_ * std::sin(theta) * dt;
-    mu_(2) += omega_ * dt;
-    mu_(2)  = normalizeAngle(mu_(2));
+    const double heading = mu_(2) + rot1;
+    mu_(0) += trans * std::cos(heading);
+    mu_(1) += trans * std::sin(heading);
+    mu_(2)  = normalizeAngle(mu_(2) + rot1 + rot2);
 
     // -------------------------------------------------------
     // Line 3: Sigma_bar_t = G_t * Sigma_{t-1} * G_t^T + R_t
     //
-    // G_t is the Jacobian of g(.) w.r.t. the state x,
-    // evaluated at mu_{t-1}  (slide 41):
+    // G_t is the Jacobian of g(.) w.r.t. the state x, evaluated at mu_{t-1}:
     //
-    //       | 1   0   -v*sin(theta)*dt |
-    //  G_t =| 0   1    v*cos(theta)*dt |
-    //       | 0   0         1          |
-    //
-    // This replaces  A_t * Sigma * A_t^T  of the KF.
+    //       | 1   0   -trans*sin(heading) |
+    //  G_t =| 0   1    trans*cos(heading) |
+    //       | 0   0          1            |
     // -------------------------------------------------------
     Eigen::Matrix3d G_t = Eigen::Matrix3d::Identity();
-    G_t(0, 2) = -v_ * std::sin(theta) * dt;
-    G_t(1, 2) =  v_ * std::cos(theta) * dt;
+    G_t(0, 2) = -trans * std::sin(heading);
+    G_t(1, 2) =  trans * std::cos(heading);
 
     Sigma_ = G_t * Sigma_ * G_t.transpose() + R_;
   }
@@ -268,7 +329,7 @@ private:
   //                     [         dy,          -dx, -q]]
   // ----------------------------------------------------------
 
-  /*void correctLandmark(double z_range, double z_bearing, const Landmark& lm)
+  void correctLandmark(double z_range, double z_bearing, const Landmark& lm)
   {
     const double dx = lm.x - mu_(0);
     const double dy = lm.y - mu_(1);
@@ -310,42 +371,6 @@ private:
     Sigma_ = I_KH * Sigma_ * I_KH.transpose() + K * Q_landmark_ * K.transpose();
   }
 
-  // ----------------------------------------------------------
-  // detectPoles()
-  //
-  // Finds pole-like landmarks in a LaserScan by locating range
-  // local minima that are significantly closer than both neighbours
-  // (an isolated pole appears as a dip in the range profile).
-  //
-  // Returns (range [m], bearing [rad]) in the robot frame.
-  // jump_threshold: minimum step [m] to call a point a pole tip.
-  // ----------------------------------------------------------
-  std::vector<std::pair<double, double>>
-  detectPoles(const sensor_msgs::msg::LaserScan::SharedPtr& scan,
-              float jump_threshold = 0.25f)
-  {
-    std::vector<std::pair<double, double>> poles;
-    const int N = static_cast<int>(scan->ranges.size());
-
-    auto valid = [&](int i) {
-      const float r = scan->ranges[i];
-      return std::isfinite(r) && r >= scan->range_min && r <= scan->range_max;
-    };
-
-    for (int i = 1; i < N - 1; ++i) {
-      if (!valid(i - 1) || !valid(i) || !valid(i + 1)) continue;
-      const float r_prev = scan->ranges[i - 1];
-      const float r_curr = scan->ranges[i];
-      const float r_next = scan->ranges[i + 1];
-
-      if (r_curr < r_prev - jump_threshold && r_curr < r_next - jump_threshold) {
-        const double bearing = scan->angle_min + i * scan->angle_increment;
-        poles.emplace_back(static_cast<double>(r_curr), bearing);
-      }
-    }
-    return poles;
-  }*/
-
   // ============================================================
   //  Callbacks
   // ============================================================
@@ -353,35 +378,27 @@ private:
   void syncCallback(const nav_msgs::msg::Odometry::ConstSharedPtr& odom_msg,
                     const sensor_msgs::msg::Imu::ConstSharedPtr& imu_msg)
   {
-    processOdom(odom_msg);
-    processImu(imu_msg);
+    predictFromOdom(odom_msg);   // Lines 2-3: motion model from the odom delta
+    processImu(imu_msg);         // Lines 4-6: yaw correction
   }
 
-  void cmdVelCallback(const geometry_msgs::msg::Twist::SharedPtr msg)
+  // ----------------------------------------------------------
+  // predictFromOdom  —  turn the raw /odom pose into a relative motion input.
+  //
+  // The first message anchors the filter (and the odom-delta reference). Every
+  // later message yields a pose INCREMENT, which is decomposed into the
+  // odometry motion model (rot1, trans, rot2) and handed to predict(). Only the
+  // delta is used, so the absolute odom drift never re-enters the estimate.
+  // ----------------------------------------------------------
+  void predictFromOdom(const nav_msgs::msg::Odometry::ConstSharedPtr& msg)
   {
-    v_     = msg->linear.x;
-    omega_ = msg->angular.z;
-
-    if (!initialized_) return;
-
-    const auto now = this->get_clock()->now();
-    const double dt = (now - last_time_).seconds();
-    last_time_ = now;
-
-    if (dt > 0.0 && dt < 1.0) {
-      predict(dt);
-    }
-  }
-
-  void processOdom(const nav_msgs::msg::Odometry::ConstSharedPtr& msg)
-  {
-    const double yaw = quaternionToYaw(msg->pose.pose.orientation);
+    const double ox  = msg->pose.pose.position.x;
+    const double oy  = msg->pose.pose.position.y;
+    const double oyaw = quaternionToYaw(msg->pose.pose.orientation);
 
     if (!initialized_) {
-      mu_(0)       = msg->pose.pose.position.x;
-      mu_(1)       = msg->pose.pose.position.y;
-      mu_(2)       = yaw;
-      last_time_   = this->get_clock()->now();
+      mu_ << ox, oy, oyaw;          // start at the first odom pose
+      last_odom_ << ox, oy, oyaw;   // reference for the first delta
       initialized_ = true;
       RCLCPP_INFO(get_logger(),
                   "EKF initialised from odometry: x=%.3f  y=%.3f  theta=%.3f",
@@ -389,13 +406,27 @@ private:
       return;
     }
 
-    const Eigen::Vector3d z(msg->pose.pose.position.x,
-                            msg->pose.pose.position.y,
-                            yaw);
+    // Pose change reported by odometry since the last message (odom frame).
+    const double prev_yaw = last_odom_(2);
+    const double dx   = ox - last_odom_(0);
+    const double dy   = oy - last_odom_(1);
+    const double dyaw = normalizeAngle(oyaw - prev_yaw);
+    last_odom_ << ox, oy, oyaw;
 
-    // H_t maps the full state [x, y, theta] directly to [x, y, theta]
-    const Eigen::Matrix3d H_t = Eigen::Matrix3d::Identity();
-    correct<3>(z, H_t, Q_odom_);
+    // Decompose into rot1 / trans / rot2 (Thrun's odometry motion model).
+    // For a (near-)pure rotation the travel direction is ill-defined, so put
+    // the whole turn into rot2 instead of letting atan2 amplify odom jitter.
+    const double trans = std::hypot(dx, dy);
+    double rot1, rot2;
+    if (trans < 1e-4) {
+      rot1 = 0.0;
+      rot2 = dyaw;
+    } else {
+      rot1 = normalizeAngle(std::atan2(dy, dx) - prev_yaw);
+      rot2 = normalizeAngle(dyaw - rot1);
+    }
+
+    predict(rot1, trans, rot2);
   }
 
   void processImu(const sensor_msgs::msg::Imu::ConstSharedPtr& msg)
@@ -413,42 +444,37 @@ private:
   }
 
   // ----------------------------------------------------------
-  // scanCallback  —  EKF localization with landmarks
+  // aprilTagCallback  —  EKF localization with AprilTag landmarks
   //
-  // For each scan frame:
-  //   1. Detect pole candidates  (robot frame: range, bearing)
-  //   2. Project each pole into the map frame using current mu_
-  //   3. Associate with nearest map landmark within threshold
-  //   4. Run correctLandmark() for each accepted association
+  // apriltag_detector_node publishes each visible tag's position in the
+  // robot (base_link) frame as a Marker (marker.id = AprilTag id). For each:
+  //   1. Known correspondence: match marker.id to a map landmark signature.
+  //   2. Convert the body-frame position to an observation (range, bearing).
+  //   3. Run correctLandmark() — one EKF correction per detected tag.
   // ----------------------------------------------------------
-  
-  /*void scanCallback(const sensor_msgs::msg::LaserScan::SharedPtr msg)
+  void aprilTagCallback(const visualization_msgs::msg::MarkerArray::SharedPtr msg)
   {
     if (!initialized_) return;
 
-    for (const auto& [range, bearing] : detectPoles(msg)) {
-      // Project scan hit into map frame
-      const double obs_x = mu_(0) + range * std::cos(mu_(2) + bearing);
-      const double obs_y = mu_(1) + range * std::sin(mu_(2) + bearing);
-
-      // Nearest-neighbour data association
+    for (const auto& marker : msg->markers) {
+      // Known correspondence: the AprilTag id IS the landmark signature.
       const Landmark* match = nullptr;
-      double best_dist = association_threshold_;
       for (const auto& lm : map_landmarks_) {
-        const double dx   = lm.x - obs_x;
-        const double dy   = lm.y - obs_y;
-        const double dist = std::sqrt(dx * dx + dy * dy);
-        if (dist < best_dist) {
-          best_dist = dist;
-          match     = &lm;
-        }
+        if (lm.id == marker.id) { match = &lm; break; }
       }
+      if (match == nullptr) continue;  // unknown tag — not in the map
 
-      if (match == nullptr) continue;
+      // Detection position in the robot body frame -> (range, bearing).
+      const double mx      = marker.pose.position.x;
+      const double my      = marker.pose.position.y;
+      const double range   = std::hypot(mx, my);
+      const double bearing = std::atan2(my, mx);
+
+      if (range < 1e-3) continue;  // degenerate / on top of the robot
 
       correctLandmark(range, bearing, *match);
     }
-  }*/
+  }
 
   // ============================================================
   //  Publisher
@@ -486,16 +512,16 @@ private:
   // ============================================================
   //  Helpers
   // ============================================================
-  // Declare a [d0, d1, d2] parameter and build a 3x3 diagonal noise matrix.
-  Eigen::Matrix3d diagMatrix3FromParam(const std::string& name,
-                                       const std::vector<double>& def)
+  // Read a REQUIRED [d0, d1, d2] parameter and build a 3x3 diagonal noise
+  // matrix. No in-code default: if the value is not provided via parameters
+  // (filter_params.yaml) the node throws on start, so the YAML is always used.
+  Eigen::Matrix3d diagMatrix3FromParam(const std::string& name)
   {
-    std::vector<double> v = declare_parameter<std::vector<double>>(name, def);
+    declare_parameter(name, rclcpp::PARAMETER_DOUBLE_ARRAY);
+    const std::vector<double> v = get_parameter(name).as_double_array();
     if (v.size() != 3) {
-      RCLCPP_WARN(get_logger(),
-                  "Parameter '%s' must have 3 elements; falling back to defaults.",
-                  name.c_str());
-      v = def;
+      throw std::runtime_error("Parameter '" + name + "' must have exactly 3 "
+                               "elements [x, y, theta].");
     }
     Eigen::Matrix3d m = Eigen::Matrix3d::Zero();
     m(0, 0) = v[0];
@@ -526,24 +552,19 @@ private:
   Eigen::Vector3d mu_;                      // State mean  [x, y, theta]
   Eigen::Matrix3d Sigma_;                   // State covariance
   Eigen::Matrix3d R_;                       // Process noise (predict step, Line 3)
-  Eigen::Matrix3d Q_odom_;                  // Odometry measurement noise (correct step, Line 4)
   Eigen::Matrix<double, 1, 1> Q_imu_;      // IMU measurement noise     (correct step, Line 4)
   Eigen::Matrix2d Q_landmark_;             // Landmark [range, bearing] noise
-  std::vector<Landmark> map_landmarks_;    // Known landmark positions in map frame
-  double association_threshold_;           // Max map-projection error [m] for association
+  std::vector<Landmark> map_landmarks_;    // Known landmark positions in odom frame
 
-  double v_     {0.0};   // Linear  velocity from /cmd_vel
-  double omega_ {0.0};   // Angular velocity from /cmd_vel
-
-  rclcpp::Time last_time_;
+  // Last raw /odom pose [x, y, theta]; the reference for the next motion delta.
+  Eigen::Vector3d last_odom_ {Eigen::Vector3d::Zero()};
   bool initialized_ {false};
 
   message_filters::Subscriber<nav_msgs::msg::Odometry> odom_filter_;
   message_filters::Subscriber<sensor_msgs::msg::Imu>   imu_filter_;
   std::shared_ptr<message_filters::Synchronizer<SyncPolicy>> sync_;
 
-  rclcpp::Subscription<sensor_msgs::msg::LaserScan>::SharedPtr scan_sub_;
-  rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr   cmd_vel_sub_;
+  rclcpp::Subscription<visualization_msgs::msg::MarkerArray>::SharedPtr apriltag_sub_;
 
   rclcpp::Publisher<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr pose_pub_;
   rclcpp::TimerBase::SharedPtr timer_;

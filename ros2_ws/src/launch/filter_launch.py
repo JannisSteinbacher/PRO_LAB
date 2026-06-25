@@ -116,6 +116,26 @@ def generate_launch_description():
     )
 
     # -----------------------------
+    # AprilTag Detector Node
+    # -----------------------------
+    # Detects tag36h11 landmarks in the TurtleBot4 camera feed and publishes
+    # their position (robot frame) on /apriltag/detections for the EKF to use.
+    apriltag_node = Node(
+        package='turtlebot_state_estimation',
+        executable='apriltag_detector_node',
+        name='apriltag_detector_node',
+        output='screen',
+        parameters=[{
+            'use_sim_time': True,
+            'image_topic': '/rgbd_camera/image',
+            'camera_info_topic': '/rgbd_camera/camera_info',
+            'detections_topic': '/apriltag/detections',
+            'base_frame': 'base_link',
+            'tag_size': 0.16,
+        }]
+    )
+
+    # -----------------------------
     # Eval Node
     # -----------------------------
     eval_node = Node(
@@ -138,5 +158,6 @@ def generate_launch_description():
         kf_node,
         ekf_node,
         pf_node,
+        apriltag_node,
         eval_node,
     ])

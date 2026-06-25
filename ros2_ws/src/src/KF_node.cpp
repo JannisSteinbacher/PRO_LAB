@@ -1,11 +1,11 @@
 #include <cmath>
+#include <stdexcept>
 #include <string>
 #include <vector>
 #include <rclcpp/rclcpp.hpp>
 
 #include <nav_msgs/msg/odometry.hpp>
 #include <sensor_msgs/msg/imu.hpp>
-#include <geometry_msgs/msg/twist.hpp>
 #include <geometry_msgs/msg/pose_with_covariance_stamped.hpp>
 
 #include <tf2/LinearMath/Quaternion.h>
@@ -35,28 +35,30 @@ public:
     // ----------------------------------------------------------
     // Initial state covariance Sigma (high uncertainty at start)
     // ----------------------------------------------------------
-    Sigma_ = Eigen::Matrix3d::Identity() * 1.0;
+    Sigma_ = Eigen::Matrix3d::Identity() * 0.2;
 
     // ----------------------------------------------------------
-    // Noise matrices loaded from parameters (see config/filter_params.yaml).
-    // Hardcoded values below are fallback defaults if no YAML is supplied.
-    //   R      : process noise         (predict step, Line 3)
-    //   Q_odom : odom pose meas. noise (correct step, Line 4)
+    // Noise matrices — loaded ONLY from parameters (config/filter_params.yaml).
+    // These are required: there are no in-code defaults, so if the YAML is not
+    // supplied the node fails to start. That guarantees the tuning always comes
+    // from filter_params.yaml (single source of truth).
+    //   R      : process noise         (predict step, Line 3 — odom motion)
     //   Q_imu  : IMU yaw meas. noise   (correct step, Line 4)
+    //
+    // Note: there is no Q_odom here. Odometry is the motion INPUT to predict(),
+    // not a correction, so it has no measurement-noise matrix. (The shared
+    // filter_params.yaml still defines Q_odom_diag; it is simply unused now.)
     // ----------------------------------------------------------
-    R_      = diagMatrix3FromParam("R_diag",      {0.05, 0.05, 0.01});
-    Q_odom_ = diagMatrix3FromParam("Q_odom_diag", {0.1, 0.1, 0.05});
-    Q_imu_(0, 0) = declare_parameter<double>("Q_imu", 0.02);
+    R_      = diagMatrix3FromParam("R_diag");
+
+    declare_parameter("Q_imu", rclcpp::PARAMETER_DOUBLE);
+    Q_imu_(0, 0) = get_parameter("Q_imu").as_double();
 
     // ----------------------------------------------------------
-    // Control Subscriber (/cmd_vel drives the prediction step)
-    // ----------------------------------------------------------
-    cmd_vel_sub_ = create_subscription<geometry_msgs::msg::Twist>(
-      "/cmd_vel", 10,
-      std::bind(&KalmanFilterNode::cmdVelCallback, this, std::placeholders::_1));
-
-    // ----------------------------------------------------------
-    // Synchronized Subscribers (Odom & IMU) for the correction step
+    // Synchronized Subscribers (Odom & IMU)
+    //   /odom drives the PREDICT step (odometry motion model, relative
+    //   increments); /imu drives a yaw CORRECTION. They are synchronized so
+    //   each cycle predicts then corrects in the proper KF order.
     // ----------------------------------------------------------
     odom_filter_.subscribe(this, "/odom");
     imu_filter_.subscribe(this, "/imu");
@@ -79,8 +81,6 @@ public:
       std::chrono::milliseconds(100),
       std::bind(&KalmanFilterNode::publishEstimate, this));
 
-    last_time_ = this->get_clock()->now();
-
     RCLCPP_INFO(get_logger(), "Linear Kalman Filter node started.");
   }
 
@@ -92,38 +92,36 @@ private:
 
 
   // ============================================================
-  //  Prediction Step (linear KF, slide 17)
+  //  Prediction Step (linear KF, slide 17), driven by the ODOMETRY
+  //  motion model.
   //
-  //  Driven by /cmd_vel (v, omega). The body-frame velocity is
-  //  rotated into a world-frame control increment using the current
-  //  heading, so the state update stays linear (A = I, B = I):
+  //  The motion input u_t is the pose INCREMENT reported by /odom between
+  //  two consecutive messages, decomposed (Thrun's odometry motion model)
+  //  into rot1 / trans / rot2 and re-applied from the filter's CURRENT pose.
+  //  As in the EKF, only the odom *delta* is used, never its absolute
+  //  (drifting) pose — so a correction already baked into mu_ is preserved
+  //  and the next motion builds forward from that anchor instead of snapping
+  //  back to where odom thinks it is.
   //
-  //    u_t = [ v*cos(theta)*dt,  v*sin(theta)*dt,  omega*dt ]
-  //
-  //  Line 2: mu_bar_t    = A_t * mu_{t-1} + B_t * u_t
+  //  Line 2: mu_bar_t    = mu_{t-1} + u_t   (full nonlinear motion model)
   //  Line 3: Sigma_bar_t = A_t * Sigma_{t-1} * A_t^T + R_t
   //
-  //  NOTE: keeping A_t = I (instead of the EKF Jacobian G_t) ignores
-  //  the theta-coupling term in the covariance propagation. This is the
-  //  deliberate linear-KF approximation that distinguishes it from the
-  //  EKF; the mean update itself uses the full velocity motion model.
+  //  NOTE: keeping A_t = I (instead of the EKF Jacobian G_t) ignores the
+  //  theta-coupling term in the covariance propagation. This is the
+  //  deliberate linear-KF approximation that distinguishes it from the EKF;
+  //  the mean update itself uses the full odometry motion model.
   // ============================================================
 
-  void predict(double dt)
+  void predict(double rot1, double trans, double rot2)
   {
-    const double theta = mu_(2);
+    // Line 2: mean update — apply the increment along the FILTER heading.
+    const double heading = mu_(2) + rot1;
+    mu_(0) += trans * std::cos(heading);
+    mu_(1) += trans * std::sin(heading);
+    mu_(2)  = normalizeAngle(mu_(2) + rot1 + rot2);
 
-    const Eigen::Vector3d u_t(v_ * std::cos(theta) * dt,
-                              v_ * std::sin(theta) * dt,
-                              omega_ * dt);
-
-    // A = I, B = I  →  mu_bar_t = mu_{t-1} + u_t
+    // Line 3: covariance update with the linear-KF approximation A_t = I.
     const Eigen::Matrix3d A_t = Eigen::Matrix3d::Identity();
-    const Eigen::Matrix3d B_t = Eigen::Matrix3d::Identity();
-
-    mu_ = A_t * mu_ + B_t * u_t;
-    mu_(2) = normalizeAngle(mu_(2));
-
     Sigma_ = A_t * Sigma_ * A_t.transpose() + R_;
   }
 
@@ -166,40 +164,30 @@ private:
   //  Callbacks
   // ============================================================
 
-  void cmdVelCallback(const geometry_msgs::msg::Twist::SharedPtr msg)
-  {
-    v_     = msg->linear.x;
-    omega_ = msg->angular.z;
-
-    if (!initialized_) return;
-
-    const auto now = this->get_clock()->now();
-    const double dt = (now - last_time_).seconds();
-    last_time_ = now;
-
-    if (dt > 0.0 && dt < 1.0) {
-      predict(dt);
-    }
-  }
-
   void syncCallback(const nav_msgs::msg::Odometry::ConstSharedPtr& odom_msg,
                     const sensor_msgs::msg::Imu::ConstSharedPtr& imu_msg)
   {
-    processOdom(odom_msg);
-    processImu(imu_msg);
+    predictFromOdom(odom_msg);   // Lines 2-3: motion model from the odom delta
+    processImu(imu_msg);         // Lines 4-6: yaw correction
   }
 
-  void processOdom(const nav_msgs::msg::Odometry::ConstSharedPtr& msg)
+  // ----------------------------------------------------------
+  // predictFromOdom  —  turn the raw /odom pose into a relative motion input.
+  //
+  // The first message anchors the filter (and the odom-delta reference). Every
+  // later message yields a pose INCREMENT, decomposed into the odometry motion
+  // model (rot1, trans, rot2) and handed to predict(). Only the delta is used,
+  // so the absolute odom drift never re-enters the estimate.
+  // ----------------------------------------------------------
+  void predictFromOdom(const nav_msgs::msg::Odometry::ConstSharedPtr& msg)
   {
-    const double x   = msg->pose.pose.position.x;
-    const double y   = msg->pose.pose.position.y;
-    const double yaw = quaternionToYaw(msg->pose.pose.orientation);
+    const double ox   = msg->pose.pose.position.x;
+    const double oy   = msg->pose.pose.position.y;
+    const double oyaw = quaternionToYaw(msg->pose.pose.orientation);
 
     if (!initialized_) {
-      mu_(0)       = x;
-      mu_(1)       = y;
-      mu_(2)       = yaw;
-      last_time_   = this->get_clock()->now();
+      mu_ << ox, oy, oyaw;          // start at the first odom pose
+      last_odom_ << ox, oy, oyaw;   // reference for the first delta
       initialized_ = true;
       RCLCPP_INFO(get_logger(),
                   "KF initialised from odometry: x=%.3f  y=%.3f  theta=%.3f",
@@ -207,10 +195,27 @@ private:
       return;
     }
 
-    // Full-pose measurement z = [x, y, theta]; C_t = I observes the whole state
-    const Eigen::Vector3d z(x, y, yaw);
-    const Eigen::Matrix3d C_t = Eigen::Matrix3d::Identity();
-    correct<3>(z, C_t, Q_odom_);
+    // Pose change reported by odometry since the last message (odom frame).
+    const double prev_yaw = last_odom_(2);
+    const double dx   = ox - last_odom_(0);
+    const double dy   = oy - last_odom_(1);
+    const double dyaw = normalizeAngle(oyaw - prev_yaw);
+    last_odom_ << ox, oy, oyaw;
+
+    // Decompose into rot1 / trans / rot2 (Thrun's odometry motion model).
+    // For a (near-)pure rotation the travel direction is ill-defined, so put
+    // the whole turn into rot2 instead of letting atan2 amplify odom jitter.
+    const double trans = std::hypot(dx, dy);
+    double rot1, rot2;
+    if (trans < 1e-4) {
+      rot1 = 0.0;
+      rot2 = dyaw;
+    } else {
+      rot1 = normalizeAngle(std::atan2(dy, dx) - prev_yaw);
+      rot2 = normalizeAngle(dyaw - rot1);
+    }
+
+    predict(rot1, trans, rot2);
   }
 
   void processImu(const sensor_msgs::msg::Imu::ConstSharedPtr& msg)
@@ -263,16 +268,16 @@ private:
   // ============================================================
   //  Helpers
   // ============================================================
-  // Declare a [d0, d1, d2] parameter and build a 3x3 diagonal noise matrix.
-  Eigen::Matrix3d diagMatrix3FromParam(const std::string& name,
-                                       const std::vector<double>& def)
+  // Read a REQUIRED [d0, d1, d2] parameter and build a 3x3 diagonal noise
+  // matrix. No in-code default: if the value is not provided via parameters
+  // (filter_params.yaml) the node throws on start, so the YAML is always used.
+  Eigen::Matrix3d diagMatrix3FromParam(const std::string& name)
   {
-    std::vector<double> v = declare_parameter<std::vector<double>>(name, def);
+    declare_parameter(name, rclcpp::PARAMETER_DOUBLE_ARRAY);
+    const std::vector<double> v = get_parameter(name).as_double_array();
     if (v.size() != 3) {
-      RCLCPP_WARN(get_logger(),
-                  "Parameter '%s' must have 3 elements; falling back to defaults.",
-                  name.c_str());
-      v = def;
+      throw std::runtime_error("Parameter '" + name + "' must have exactly 3 "
+                               "elements [x, y, theta].");
     }
     Eigen::Matrix3d m = Eigen::Matrix3d::Zero();
     m(0, 0) = v[0];
@@ -303,16 +308,11 @@ private:
   Eigen::Vector3d mu_;                  // State mean  [x, y, theta]
   Eigen::Matrix3d Sigma_;               // State covariance
   Eigen::Matrix3d R_;                   // Process noise        (predict step, Line 3)
-  Eigen::Matrix3d Q_odom_;              // Odometry pose noise   (correct step, Line 4)
   Eigen::Matrix<double, 1, 1> Q_imu_;  // IMU yaw noise         (correct step, Line 4)
 
-  double v_     {0.0};   // Linear  velocity from /cmd_vel
-  double omega_ {0.0};   // Angular velocity from /cmd_vel
-
-  rclcpp::Time last_time_;
+  // Last raw /odom pose [x, y, theta]; the reference for the next motion delta.
+  Eigen::Vector3d last_odom_ {Eigen::Vector3d::Zero()};
   bool initialized_ {false};
-
-  rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr cmd_vel_sub_;
 
   message_filters::Subscriber<nav_msgs::msg::Odometry> odom_filter_;
   message_filters::Subscriber<sensor_msgs::msg::Imu>   imu_filter_;
