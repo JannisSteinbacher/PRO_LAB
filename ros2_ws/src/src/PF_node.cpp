@@ -21,7 +21,7 @@
 #include <tf2_ros/transform_listener.h>
 
 // ============================================================
-//  Monte Carlo Localization (Particle Filter) Node
+//  Particle Filter Node
 //
 //  Full MCL (Thrun, Probabilistic Robotics, Table 8.2):
 //
@@ -33,7 +33,7 @@
 //
 //  1) PREDICT  — odometry motion model, sample_motion_model_odometry
 //                (Table 5.6) driven by the pose delta from nav_msgs/Odometry
-//                (/odom).  Uses the physical wheel odometry, not /cmd_vel.
+//                (/odom).  
 //
 //  2) CORRECT  — likelihood-field range-finder model (Table 6.3) using
 //                sensor_msgs/LaserScan (/scan) against nav_msgs/OccupancyGrid
@@ -51,7 +51,7 @@
 //                /particlecloud for RViz.
 //
 //  Updates (correct + resample) are gated on a minimum amount of motion
-//  since the last update (AMCL style) to avoid particle depletion while the
+//  since the last update to avoid particle depletion while the
 //  robot is standing still.
 // ============================================================
 
@@ -68,8 +68,8 @@ public:
     ParticleFilterNode()
     : Node("particle_filter_node"), gen_(std::random_device{}())
     {
-        // ---- Parameters (all tunable, sensible AMCL-like defaults) ----
-        M_              = declare_parameter<int>("num_particles", 2000);
+        // ---- Parameters ----
+        M_              = declare_parameter<int>("num_particles", 2000); 
 
         // Odometry motion-noise parameters alpha_1..alpha_4 (Table 5.6)
         alpha1_         = declare_parameter<double>("alpha1", 0.2);  // rot   noise from rotation

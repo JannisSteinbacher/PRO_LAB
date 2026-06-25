@@ -29,28 +29,19 @@ public:
   KalmanFilterNode() : Node("kalman_filter_node")
   {
     // ----------------------------------------------------------
-    // Initial state  mu = [0, 0, 0]
+    // Initial state  mu_ = [0, 0, 0]
     // ----------------------------------------------------------
     mu_ = Eigen::Vector3d::Zero();
 
     // ----------------------------------------------------------
-    // Initial state covariance Sigma (high uncertainty at start)
+    // Initial state covariance Sigma 
     // ----------------------------------------------------------
     Sigma_ = Eigen::Matrix3d::Identity() * 0.0;
 
     // ----------------------------------------------------------
     // Noise matrices — loaded ONLY from parameters (config/filter_params.yaml).
-    // These are required: there are no in-code defaults, so if the YAML is not
-    // supplied the node fails to start. That guarantees the tuning always comes
-    // from filter_params.yaml (single source of truth).
-    //   R      : process noise         (predict step, Line 3 — odom motion)
-    //   Q_imu  : IMU yaw meas. noise   (correct step, Line 4)
-    //
-    // Note: there is no Q_odom here. Odometry is the motion INPUT to predict(),
-    // not a correction, so it has no measurement-noise matrix. (The shared
-    // filter_params.yaml still defines Q_odom_diag; it is simply unused now.)
     // ----------------------------------------------------------
-    R_      = diagMatrix3FromParam("R_diag");
+    R_ = diagMatrix3FromParam("R_diag");
 
     declare_parameter("Q_imu", rclcpp::PARAMETER_DOUBLE);
     Q_imu_(0, 0) = get_parameter("Q_imu").as_double();
@@ -79,7 +70,7 @@ public:
       "/kf/pose_estimate", 10);
 
     // Scalar Kalman gain applied to theta from the IMU yaw correction, for the
-    // eval node to log. See k_theta_imu_ and correct().
+    // eval node to log
     kgain_pub_ = create_publisher<std_msgs::msg::Float64>(
       "/kf/kalman_gain_theta", 10);
 
@@ -98,24 +89,12 @@ private:
 
 
   // ============================================================
-  //  Prediction Step (linear KF, slide 17), driven by the ODOMETRY
-  //  motion model.
+  //  Prediction Step, driven by the ODOMETRY motion model.
   //
-  //  The motion input u_t is the pose INCREMENT reported by /odom between
-  //  two consecutive messages, decomposed (Thrun's odometry motion model)
-  //  into rot1 / trans / rot2 and re-applied from the filter's CURRENT pose.
-  //  As in the EKF, only the odom *delta* is used, never its absolute
-  //  (drifting) pose — so a correction already baked into mu_ is preserved
-  //  and the next motion builds forward from that anchor instead of snapping
-  //  back to where odom thinks it is.
+  //  The odometry message is decomposed into a relative motion increment
   //
   //  Line 2: mu_bar_t    = mu_{t-1} + u_t   (full nonlinear motion model)
   //  Line 3: Sigma_bar_t = A_t * Sigma_{t-1} * A_t^T + R_t
-  //
-  //  NOTE: keeping A_t = I (instead of the EKF Jacobian G_t) ignores the
-  //  theta-coupling term in the covariance propagation. This is the
-  //  deliberate linear-KF approximation that distinguishes it from the EKF;
-  //  the mean update itself uses the full odometry motion model.
   // ============================================================
 
   void predict(double rot1, double trans, double rot2)
@@ -178,8 +157,8 @@ private:
   void syncCallback(const nav_msgs::msg::Odometry::ConstSharedPtr& odom_msg,
                     const sensor_msgs::msg::Imu::ConstSharedPtr& imu_msg)
   {
-    predictFromOdom(odom_msg);   // Lines 2-3: motion model from the odom delta
-    processImu(imu_msg);         // Lines 4-6: yaw correction
+    predictFromOdom(odom_msg);
+    processImu(imu_msg);         
   }
 
   // ----------------------------------------------------------
@@ -323,15 +302,15 @@ private:
 
   Eigen::Vector3d mu_;                  // State mean  [x, y, theta]
   Eigen::Matrix3d Sigma_;               // State covariance
-  Eigen::Matrix3d R_;                   // Process noise        (predict step, Line 3)
-  Eigen::Matrix<double, 1, 1> Q_imu_;  // IMU yaw noise         (correct step, Line 4)
+  Eigen::Matrix3d R_;                   // Process noise        
+  Eigen::Matrix<double, 1, 1> Q_imu_;  // IMU yaw noise       
 
-  // Latest theta Kalman gain from the IMU yaw correction (published for eval).
+  // Latest theta Kalman gain from the IMU yaw correction (published for evaluation).
   double k_theta_imu_ {0.0};
 
   // Last raw /odom pose [x, y, theta]; the reference for the next motion delta.
   Eigen::Vector3d last_odom_ {Eigen::Vector3d::Zero()};
-  bool initialized_ {false};
+  bool initialized_ = false;
 
   message_filters::Subscriber<nav_msgs::msg::Odometry> odom_filter_;
   message_filters::Subscriber<sensor_msgs::msg::Imu>   imu_filter_;

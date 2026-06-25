@@ -14,8 +14,6 @@
     # --- Process noise R : diagonal [x, y, theta]  (predict step) ---
     R_diag: [0.001, 0.001, 0.001]
 
-    # --- Measurement noise Q : odom full pose [x, y, theta]  (correct step) ---
-    #Q_odom_diag: [200.0, 200.0, 100.0]
 
     # --- Measurement noise Q : IMU yaw [theta]  (correct step) ---
     Q_imu: 0.05
@@ -57,7 +55,7 @@ pf_node:
   ros__parameters:
     # Number of starting particles — INTEGER, no decimal point.  More particles
     # cover more hypotheses but cost linearly more CPU per scan (was 2000).
-    num_particles: 5000
+    num_particles: 7000
 
     # ---- Resampling softness (the knobs that stop the cloud collapsing) ----
     # Likelihood tempering  p(z|x)^lambda ,  0 < lambda <= 1  (double, needs a '.')

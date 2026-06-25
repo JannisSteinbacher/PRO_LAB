@@ -79,23 +79,7 @@
 //    by the spawn pose 'map_origin' so landmarks and state share one frame.
 // ============================================================
 
-// ------------------------------------------------------------
-//  Landmark definition
-//
-//  A landmark is a known feature in the map with a fixed
-//  world-frame position and an optional integer signature (id).
-//
-//  How to define a good landmark:
-//    - Landmarks must be UNIQUELY IDENTIFIABLE from sensor data
-//      so data association (observed -> map) is unambiguous.
-//    - Choose features that are STABLE over time (poles, pillars,
-//      corner reflectors) — not dynamic objects like furniture.
-//    - Space them so at least 2-3 are ALWAYS VISIBLE for good
-//      observability of x, y, and theta simultaneously.
-//    - Record world positions precisely (survey or SLAM-built map).
-//    - Use 'id' to encode color, reflectance class, or shape so
-//      association can be signature-based rather than nearest-neighbour.
-// ------------------------------------------------------------
+
 struct Landmark {
     double x;   // world-frame x  [m]
     double y;   // world-frame y  [m]
@@ -108,27 +92,17 @@ public:
   ExtendedKalmanFilterNode() : Node("extended_kalman_filter_node")
   {
     // ----------------------------------------------------------
-    // Initial state  mu = [0, 0, 0]
+    // Initial state  mu_ = [0, 0, 0]
     // ----------------------------------------------------------
     mu_ = Eigen::Vector3d::Zero();
 
     // ----------------------------------------------------------
-    // Initial state covariance Sigma (high uncertainty at start)
+    // Initial state covariance Sigma 
     // ----------------------------------------------------------
     Sigma_ = Eigen::Matrix3d::Identity() * 0.0;
 
     // ----------------------------------------------------------
-    // Noise matrices — loaded ONLY from parameters (config/filter_params.yaml).
-    // These are required: there are no in-code defaults, so if the YAML is not
-    // supplied the node fails to start. That guarantees the tuning always comes
-    // from filter_params.yaml (single source of truth).
-    //   R      : process noise         (predict step, Line 3 — odom motion)
-    //   Q_imu  : IMU yaw meas. noise   (correct step, Line 4)
-    //   Q_landmark : [range, bearing] landmark meas. noise
-    //
-    // Note: there is no Q_odom here. Odometry is the motion INPUT to predict(),
-    // not a correction, so it has no measurement-noise matrix. (The shared
-    // filter_params.yaml still defines Q_odom_diag for the linear KF node.)
+    // Noise matrices — loaded ONLY from parameters (config/filter_params.yaml)
     // ----------------------------------------------------------
     R_      = diagMatrix3FromParam("R_diag");
 
@@ -196,9 +170,6 @@ public:
 
     // ----------------------------------------------------------
     // Synchronized Subscribers (Odom & IMU)
-    //   /odom drives the PREDICT step (odometry motion model, relative
-    //   increments); /imu drives a yaw CORRECTION. They are synchronized so
-    //   each cycle predicts then corrects in the proper EKF order.
     // ----------------------------------------------------------
     odom_filter_.subscribe(this, "/odom");
     imu_filter_.subscribe(this, "/imu");
@@ -217,9 +188,7 @@ public:
     pose_pub_ = create_publisher<geometry_msgs::msg::PoseWithCovarianceStamped>(
       "/ekf/pose_estimate", 10);
 
-    // Scalar Kalman gain applied to theta from the IMU yaw correction, for the
-    // eval node to log. See k_theta_imu_ and correct().
-    kgain_pub_ = create_publisher<std_msgs::msg::Float64>(
+    kgain_pub_ = create_publisher<std_msgs::msg::Float64>(  //published only for evaluation
       "/ekf/kalman_gain_theta", 10);
 
     timer_ = create_wall_timer(
@@ -248,10 +217,7 @@ private:
   //   rot1  : initial turn toward the direction of travel
   //   trans : straight-line distance travelled
   //   rot2  : final turn to the new heading
-  // and then re-applied starting from the filter's CURRENT pose mu_. This is
-  // the whole point of the fix: we consume only the odom *delta*, never its
-  // absolute (drifting) pose, so any landmark correction already baked into
-  // mu_ is preserved and the next motion builds forward from that anchor.
+  // and then re-applied starting from the filter's CURRENT pose mu_
   void predict(double rot1, double trans, double rot2)
   {
     // -------------------------------------------------------
