@@ -9,6 +9,7 @@
 #include <sensor_msgs/msg/imu.hpp>
 #include <geometry_msgs/msg/pose_with_covariance_stamped.hpp>
 #include <visualization_msgs/msg/marker_array.hpp>
+#include <std_msgs/msg/float64.hpp>
 
 #include <tf2/LinearMath/Quaternion.h>
 #include <tf2/LinearMath/Matrix3x3.h>
@@ -114,7 +115,7 @@ public:
     // ----------------------------------------------------------
     // Initial state covariance Sigma (high uncertainty at start)
     // ----------------------------------------------------------
-    Sigma_ = Eigen::Matrix3d::Identity() * 0.2;
+    Sigma_ = Eigen::Matrix3d::Identity() * 0.0;
 
     // ----------------------------------------------------------
     // Noise matrices — loaded ONLY from parameters (config/filter_params.yaml).
@@ -216,6 +217,11 @@ public:
     pose_pub_ = create_publisher<geometry_msgs::msg::PoseWithCovarianceStamped>(
       "/ekf/pose_estimate", 10);
 
+    // Scalar Kalman gain applied to theta from the IMU yaw correction, for the
+    // eval node to log. See k_theta_imu_ and correct().
+    kgain_pub_ = create_publisher<std_msgs::msg::Float64>(
+      "/ekf/kalman_gain_theta", 10);
+
     timer_ = create_wall_timer(
       std::chrono::milliseconds(100),
       std::bind(&ExtendedKalmanFilterNode::publishEstimate, this));
@@ -305,6 +311,12 @@ private:
     // Line 4: Kalman Gain
     const Eigen::Matrix<double, M, M> S  = H_t * Sigma_ * H_t.transpose() + Q;
     const Eigen::Matrix<double, 3, M> K_t = Sigma_ * H_t.transpose() * S.inverse();
+
+    // Record the theta-row gain w.r.t. the first measurement for logging.
+    // correct<>() is only ever called for the IMU yaw update (M=1); the
+    // landmark updates use correctLandmark(), so K_t(2, 0) here is the Kalman
+    // gain applied to theta from the yaw measurement (comparable to the KF).
+    k_theta_imu_ = K_t(2, 0);
 
     // Line 5: State update
     mu_ = mu_ + K_t * innovation;
@@ -507,6 +519,11 @@ private:
     out.pose.covariance[35] = Sigma_(2, 2);
 
     pose_pub_->publish(out);
+
+    // Publish the latest theta Kalman gain alongside the pose (same rate).
+    std_msgs::msg::Float64 kg;
+    kg.data = k_theta_imu_;
+    kgain_pub_->publish(kg);
   }
 
   // ============================================================
@@ -556,6 +573,9 @@ private:
   Eigen::Matrix2d Q_landmark_;             // Landmark [range, bearing] noise
   std::vector<Landmark> map_landmarks_;    // Known landmark positions in odom frame
 
+  // Latest theta Kalman gain from the IMU yaw correction (published for eval).
+  double k_theta_imu_ {0.0};
+
   // Last raw /odom pose [x, y, theta]; the reference for the next motion delta.
   Eigen::Vector3d last_odom_ {Eigen::Vector3d::Zero()};
   bool initialized_ {false};
@@ -567,6 +587,7 @@ private:
   rclcpp::Subscription<visualization_msgs::msg::MarkerArray>::SharedPtr apriltag_sub_;
 
   rclcpp::Publisher<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr pose_pub_;
+  rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr kgain_pub_;
   rclcpp::TimerBase::SharedPtr timer_;
 };
 

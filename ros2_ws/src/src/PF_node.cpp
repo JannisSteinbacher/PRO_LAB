@@ -41,10 +41,13 @@
 //                precomputed once so each beam endpoint is scored by its
 //                distance to the nearest occupied cell.
 //
-//  3) RESAMPLE — normalize weights, compute the effective sample size
-//                N_eff = 1 / Σ w², and systematically resample whenever
-//                N_eff drops below half the particle count.  The surviving
-//                cloud is published as geometry_msgs/PoseArray on
+//  3) RESAMPLE — temper the weights (p(z|x)^lambda) so the product-of-beams
+//                likelihood is not pathologically peaked, normalize, compute the
+//                effective sample size N_eff = 1 / Σ w², and systematically
+//                resample only when N_eff drops below half the particle count.
+//                Resampled (duplicated) particles are roughened with a small
+//                Gaussian jitter to preserve diversity around the good guesses.
+//                The surviving cloud is published as geometry_msgs/PoseArray on
 //                /particlecloud for RViz.
 //
 //  Updates (correct + resample) are gated on a minimum amount of motion
@@ -85,6 +88,21 @@ public:
         update_min_d_   = declare_parameter<double>("update_min_d", 0.20); // [m]
         update_min_a_   = declare_parameter<double>("update_min_a", 0.30); // [rad]
         resample_ratio_ = declare_parameter<double>("resample_neff_ratio", 0.5);
+
+        // Weight tempering: evaluate p(z|x)^lambda with 0<lambda<=1.  Multiplying
+        // ~max_beams independent beam likelihoods yields an extremely peaked
+        // weight, so one slightly-better particle dominates and resampling wipes
+        // out the whole cloud.  lambda<1 flattens the weights so bad particles are
+        // far less likely to be culled and several hypotheses survive (slides 13-16).
+        weight_lambda_  = declare_parameter<double>("weight_lambda", 0.30);
+
+        // Roughening: Gaussian jitter added to every particle right after
+        // resampling.  Resampling duplicates high-weight particles; without this
+        // the survivors are identical clones and the cloud visually "collapses".
+        // The jitter turns each duplicate into a genuinely new sample spread
+        // around the good guess (keeps diversity, aids recovery -- slide 20/8).
+        roughen_xy_     = declare_parameter<double>("roughen_xy", 0.05);  // [m]
+        roughen_yaw_    = declare_parameter<double>("roughen_yaw", 0.03); // [rad]
 
         // Occupancy threshold (grid value >= this == occupied, percent 0..100)
         occ_threshold_  = declare_parameter<int>("occupied_threshold", 50);
@@ -253,7 +271,10 @@ private:
                 const double pz = z_hit_ * std::exp(-(d * d) / two_sigma2) + z_rand_term;
                 log_w += std::log(pz);                          // pz > 0 always
             }
-            p.weight = log_w;   // store log-weight temporarily
+            // Temper the likelihood: p(z|x)^lambda  ==  lambda * log p(z|x).
+            // Flattens the otherwise extremely peaked product-of-beams weight so
+            // resampling does not cull all but the single best particle.
+            p.weight = weight_lambda_ * log_w;   // store (tempered) log-weight
         }
 
         // Normalize from log-space via max-subtraction.
@@ -286,8 +307,26 @@ private:
         for (const auto& p : particles_) sum_sq += p.weight * p.weight;
         const double n_eff = (sum_sq > 0.0) ? 1.0 / sum_sq : 0.0;
 
-        if (n_eff < resample_ratio_ * M_)
+        if (n_eff < resample_ratio_ * M_) {
             particles_ = systematicResample(particles_);
+            roughenParticles();   // spread the duplicated good guesses out again
+        }
+    }
+
+    // Add small Gaussian jitter to every particle after resampling.  Resampling
+    // draws (with replacement) from the high-weight particles, so the survivors
+    // are duplicates of a few "good guesses".  Without roughening the cloud
+    // collapses onto those identical points; the jitter turns each copy into a
+    // genuinely new, slightly-displaced sample around the good guess -- keeping
+    // diversity and the filter's ability to recover (Gaussian noise, slide 20).
+    void roughenParticles()
+    {
+        if (roughen_xy_ <= 0.0 && roughen_yaw_ <= 0.0) return;
+        for (auto& p : particles_) {
+            p.x    += sampleNormal(roughen_xy_);
+            p.y    += sampleNormal(roughen_xy_);
+            p.theta = normalizeAngle(p.theta + sampleNormal(roughen_yaw_));
+        }
     }
 
     std::vector<Particle> systematicResample(const std::vector<Particle>& weighted)
@@ -577,6 +616,8 @@ private:
     double z_hit_, z_rand_, sigma_hit_, laser_max_dist_;
     int    max_beams_;
     double update_min_d_, update_min_a_, resample_ratio_;
+    double weight_lambda_;                 // likelihood tempering exponent
+    double roughen_xy_, roughen_yaw_;      // post-resample jitter
     int    occ_threshold_;
 
     std::vector<Particle> particles_;        // current particle set X_t

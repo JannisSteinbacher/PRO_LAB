@@ -28,6 +28,9 @@
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
 
+  <!-- filter_launch.py: bridges gz ground-truth poses into ROS 2 -->
+  <exec_depend>ros_gz_bridge</exec_depend>
+
 
   <test_depend>ament_lint_auto</test_depend>
   <test_depend>ament_lint_common</test_depend>

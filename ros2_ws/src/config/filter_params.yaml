@@ -5,17 +5,6 @@
 #    R = PROCESS / motion noise     -> used in the PREDICT step
 #    Q = MEASUREMENT / sensor noise -> used in the CORRECT step
 #
-#  The '/**' wildcard applies these values to EVERY node that is
-#  given this file (kf_node and ekf_node), so both filters are tuned
-#  from one place and compared on identical noise assumptions.
-#
-#  To tune one filter independently, add a node-specific block, e.g.
-#
-#    kf_node:
-#      ros__parameters:
-#        R_diag: [0.1, 0.1, 0.02]
-#
-#  A node-specific value overrides the matching '/**' value.
 # ============================================================
 /**:
   ros__parameters:
@@ -52,3 +41,35 @@
 
     # Robot spawn pose in the world frame [x, y, yaw]  (nav2 tb4 depot default).
     map_origin: [-8.0, 0.0, 0.0]
+
+# ============================================================
+#  Particle Filter (MCL) tuning  ->  applies to pf_node only.
+#
+#  Kept in its own node block so the R/Q values above are not mixed in.
+#  The '/**' block still reaches pf_node, but the PF simply ignores the
+#  parameters it does not declare.
+#
+#  NOTE: these are read ONCE when the node starts, so edit them here (or
+#  pass -p on the command line) and RELAUNCH — `ros2 param set` at runtime
+#  has no effect (there is no on-set callback).
+# ============================================================
+pf_node:
+  ros__parameters:
+    # Number of starting particles — INTEGER, no decimal point.  More particles
+    # cover more hypotheses but cost linearly more CPU per scan (was 2000).
+    num_particles: 5000
+
+    # ---- Resampling softness (the knobs that stop the cloud collapsing) ----
+    # Likelihood tempering  p(z|x)^lambda ,  0 < lambda <= 1  (double, needs a '.')
+    #   lower  -> flatter weights: bad particles survive, more hypotheses kept
+    #   higher -> sharper weights: faster convergence but more aggressive culling
+    weight_lambda: 0.05
+
+    # Gaussian jitter added to every particle right after resampling, so the
+    # duplicated good guesses spread out instead of becoming identical clones.
+    roughen_xy:  0.1    # [m]   position jitter
+    roughen_yaw: 0.08    # [rad] heading  jitter
+
+    # Resample only when N_eff < ratio * num_particles.
+    #   lower -> resample less often, keep more particles between updates
+    resample_neff_ratio: 0.3

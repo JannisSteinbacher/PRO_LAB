@@ -7,6 +7,10 @@ import math
 # Import the Nav2 Simple Commander API
 from nav2_simple_commander.robot_navigator import BasicNavigator, TaskResult
 from geometry_msgs.msg import PoseStamped
+from std_msgs.msg import Empty
+from rclpy.qos import (
+    QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy,
+)
 
 def euler_to_quaternion(roll, pitch, yaw):
     """
@@ -53,45 +57,57 @@ def main(args=None):
     navigator.waitUntilNav2Active()
     print("Nav2 is active! Preparing waypoints.")
 
+    # Latched publisher that tells the eval node when to start recording, so it
+    # skips the long Gazebo/Nav2 startup where the robot is parked at spawn.
+    # Transient-local keeps the signal available even if eval subscribes late.
+    start_qos = QoSProfile(
+        reliability=ReliabilityPolicy.RELIABLE,
+        durability=DurabilityPolicy.TRANSIENT_LOCAL,
+        history=HistoryPolicy.KEEP_LAST,
+        depth=1,
+    )
+    eval_start_pub = navigator.create_publisher(Empty, '/eval/start', start_qos)
+
     # 3. Define the Waypoints (Adjust these to fit your example map!)
     # create_waypoint(navigator, x_meters, y_meters, yaw_degrees)
     wp1 = create_waypoint(navigator, 5.2, 3.58, 0.0)
     wp2 = create_waypoint(navigator, 8.25, 5.166, 180.0)
     wp3 = create_waypoint(navigator, -6.11, 2.625, 180.0)
-    wp4 = create_waypoint(navigator, 1.26, 0.78, 0.0)
+    wp4 = create_waypoint(navigator, 0.0, 0.0, 0.0)
 
     # Put them in a list
     route = [wp1, wp2, wp3, wp4]
 
-    # 4. Infinite Loop for Patrolling
-    loop_count = 1
-    while rclpy.ok():
-        print(f"--- Starting Patrol Loop #{loop_count} ---")
-        
-        # Send the route to Nav2
-        navigator.followWaypoints(route)
+    # 4. Drive the route once, then exit.
+    print("--- Starting patrol route ---")
 
-        # Wait while the robot is driving
-        while not navigator.isTaskComplete():
-            # You can do other things here, like print feedback or check sensors
-            feedback = navigator.getFeedback()
-            if feedback:
-                print(f"Executing waypoint {feedback.current_waypoint} / {len(route)}", end="\r")
+    # Send the route to Nav2
+    navigator.followWaypoints(route)
 
-        # Check the result of the task
-        result = navigator.getResult()
-        if result == TaskResult.SUCCEEDED:
-            print("\nLoop completed successfully! Restarting...")
-        elif result == TaskResult.CANCELED:
-            print("\nTask was canceled. Exiting.")
-            break
-        elif result == TaskResult.FAILED:
-            print("\nTask failed! Exiting.")
-            break
-            
-        loop_count += 1
+    # Signal the eval node so tracking starts the moment the robot begins
+    # driving (publish once; latched for late joiners).
+    eval_start_pub.publish(Empty())
+    print("Published /eval/start — evaluation tracking begins.")
 
-    # Clean up
+    # Wait while the robot is driving
+    while not navigator.isTaskComplete():
+        # You can do other things here, like print feedback or check sensors
+        feedback = navigator.getFeedback()
+        if feedback:
+            print(f"Executing waypoint {feedback.current_waypoint} / {len(route)}", end="\r")
+
+    # Check the result of the task
+    result = navigator.getResult()
+    if result == TaskResult.SUCCEEDED:
+        print("\nReached the final waypoint! Patrol complete — shutting down.")
+    elif result == TaskResult.CANCELED:
+        print("\nTask was canceled. Exiting.")
+    elif result == TaskResult.FAILED:
+        print("\nTask failed! Exiting.")
+
+    # Clean up. Exiting this process triggers the launch file's OnProcessExit
+    # handler, which shuts the whole stack down (and the eval node writes its
+    # PNG/CSV outputs on that shutdown).
     navigator.lifecycleShutdown()
     rclpy.shutdown()
 

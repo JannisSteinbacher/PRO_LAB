@@ -79,6 +79,12 @@ install(PROGRAMS
   RENAME apriltag_detector_node
 )
 
+install(PROGRAMS
+  patrol_node.py
+  DESTINATION lib/${PROJECT_NAME}
+  RENAME patrol_node
+)
+
 install(DIRECTORY
   launch
   rviz

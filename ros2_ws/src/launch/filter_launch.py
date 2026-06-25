@@ -3,7 +3,11 @@ from launch.actions import (
     IncludeLaunchDescription,
     AppendEnvironmentVariable,
     DeclareLaunchArgument,
+    RegisterEventHandler,
+    EmitEvent,
 )
+from launch.event_handlers import OnProcessExit
+from launch.events import Shutdown
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 
@@ -20,13 +24,14 @@ def generate_launch_description():
     # -----------------------------
     # Launch arguments
     # -----------------------------
-    # Set eval:=false to skip writing the evaluation PNG on shutdown
-    # (e.g. `ros2 launch ... filter_launch.py eval:=false` for quick testing).
-    # The eval node still runs and collects data; only the PNG is suppressed.
+    # Set eval:=false to skip writing the evaluation outputs (PNG + CSVs) on
+    # shutdown (e.g. `ros2 launch ... filter_launch.py eval:=false` for quick
+    # testing). The eval node still runs and collects data; only the files are
+    # suppressed.
     eval_arg = DeclareLaunchArgument(
         'eval',
         default_value='true',
-        description='Generate the evaluation PNG on shutdown.'
+        description='Write the evaluation PNG and CSV files on shutdown.'
     )
 
     # -----------------------------
@@ -106,13 +111,15 @@ def generate_launch_description():
     # -----------------------------
     # PF Node
     # -----------------------------
-    # NOTE: PF_node does not yet declare the central R/Q parameters,
-    # so filter_params is intentionally not passed here.
+    # PF reads its own 'pf_node:' block from filter_params.yaml (num_particles
+    # and the resampling/tempering knobs). The shared '/**' R/Q values are also
+    # passed but harmlessly ignored — the PF does not declare them.
     pf_node = Node(
         package='turtlebot_state_estimation',
         executable='PF_node',
         name='pf_node',
-        output='screen'
+        output='screen',
+        parameters=[filter_params]
     )
 
     # -----------------------------
@@ -136,6 +143,29 @@ def generate_launch_description():
     )
 
     # -----------------------------
+    # Ground-truth pose bridge
+    # -----------------------------
+    # Gazebo only publishes entity poses on the gz-transport side
+    # (gz.msgs.Pose_V on /world/depot/dynamic_pose/info). This parameter_bridge
+    # relays it into ROS 2 as a geometry_msgs/PoseArray so the eval node can
+    # read ground truth — replacing the manual `ros2 run ros_gz_bridge
+    # parameter_bridge ...` we used to start in a second terminal.
+    #   '[' = gz -> ROS only (one-way). NOTE: the bridge drops each entity's
+    #   name (PoseArray has no names; the TFMessage variant leaves child_frame_id
+    #   empty for this topic), so the eval node picks the robot out of the array
+    #   by matching its spawn position — see ground_truth_spawn_xy below.
+    gt_topic = '/world/depot/dynamic_pose/info'
+    gt_pose_bridge = Node(
+        package='ros_gz_bridge',
+        executable='parameter_bridge',
+        name='gt_pose_bridge',
+        output='screen',
+        arguments=[
+            f'{gt_topic}@geometry_msgs/msg/PoseArray[gz.msgs.Pose_V',
+        ],
+    )
+
+    # -----------------------------
     # Eval Node
     # -----------------------------
     eval_node = Node(
@@ -144,11 +174,39 @@ def generate_launch_description():
         name='eval_node',
         output='screen',
         parameters=[{
-            'ground_truth_topic': '/world/depot/dynamic_pose/info',
-            'ground_truth_index': 1,
+            'ground_truth_topic': gt_topic,
+            # Robot spawn in the world frame; must match map_origin[:2] in
+            # filter_params.yaml. The eval node locks onto the array entry
+            # nearest this point, so it stays correct if the entity order shifts.
+            'ground_truth_spawn_xy': [-8.0, 0.0],
             'save_plots': ParameterValue(
                 LaunchConfiguration('eval'), value_type=bool),
+            'save_csv': ParameterValue(
+                LaunchConfiguration('eval'), value_type=bool),
         }]
+    )
+
+    # -----------------------------
+    # Patrol Node
+    # -----------------------------
+    # Drives the TurtleBot through the 4 waypoints once via Nav2 (replaces the
+    # manual `./patrol_node.py` we used to start in a second terminal). It blocks
+    # on waitUntilNav2Active(), so it's safe to launch alongside the rest of the
+    # stack — it just waits for Nav2 to come up before sending goals.
+    patrol_node = Node(
+        package='turtlebot_state_estimation',
+        executable='patrol_node',
+        output='screen',
+    )
+
+    # When the patrol reaches the 4th/last waypoint it exits. That triggers this
+    # handler, which shuts the whole launch down — the eval node writes its
+    # PNG/CSV on shutdown, and `ros2 launch` returns to the prompt.
+    shutdown_on_patrol_done = RegisterEventHandler(
+        OnProcessExit(
+            target_action=patrol_node,
+            on_exit=[EmitEvent(event=Shutdown(reason='Patrol route complete'))],
+        )
     )
 
     return LaunchDescription([
@@ -159,5 +217,8 @@ def generate_launch_description():
         ekf_node,
         pf_node,
         apriltag_node,
+        gt_pose_bridge,
         eval_node,
+        patrol_node,
+        shutdown_on_patrol_done,
     ])
