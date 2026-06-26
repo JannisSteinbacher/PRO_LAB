@@ -44,7 +44,7 @@
 //  3) RESAMPLE — temper the weights (p(z|x)^lambda) so the product-of-beams
 //                likelihood is not pathologically peaked, normalize, compute the
 //                effective sample size N_eff = 1 / Σ w², and systematically
-//                resample only when N_eff drops below half the particle count.
+//                resample only when N_eff drops below the parameter threshold.
 //                Resampled (duplicated) particles are roughened with a small
 //                Gaussian jitter to preserve diversity around the good guesses.
 //                The surviving cloud is published as geometry_msgs/PoseArray on
@@ -120,7 +120,6 @@ public:
         tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
 
         // ---- Subscriptions ----
-        // Map is latched -> transient_local durability is required to get it.
         auto map_qos = rclcpp::QoS(rclcpp::KeepLast(1)).transient_local().reliable();
         map_sub_ = create_subscription<nav_msgs::msg::OccupancyGrid>(
             "/map", map_qos,
@@ -378,7 +377,6 @@ private:
         have_odom_ = true;
     }
 
-    // The "brain": predict from accumulated odometry, then correct + resample.
     void scanCallback(const sensor_msgs::msg::LaserScan::SharedPtr msg)
     {
         if (!map_received_ || !have_odom_) return;

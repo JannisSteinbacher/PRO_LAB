@@ -33,7 +33,7 @@
 //    The motion input u_t is the INCREMENTAL pose change reported by /odom
 //    (the delta between two consecutive odom messages), decomposed into
 //    rot1 / trans / rot2 and re-applied from the filter's CURRENT pose.
-//    We deliberately use only the odometry *increment*, never its absolute
+//    I deliberately use only the odometry *increment*, never its absolute
 //    pose: raw odometry drifts, so feeding its absolute pose back in as a
 //    measurement would continuously drag the estimate onto the drifted track
 //    and undo every landmark fix the moment a tag leaves view. Landmarks
@@ -52,7 +52,7 @@
 //    - predict() builds the Jacobian G_t analytically and uses it for
 //      covariance propagation instead of A_t * Sigma * A_t^T
 //    - correct() is structurally identical to the KF but uses H_t
-//      (same role as C_t in the KF) and the Joseph form for Sigma
+//      (same role as C_t in the KF) 
 //
 //  EKF Localization with AprilTag landmarks (aprilTagCallback):
 //    Implements EKF_localization_known_correspondences (Thrun 2006, slide 25).
@@ -218,6 +218,7 @@ private:
   //   trans : straight-line distance travelled
   //   rot2  : final turn to the new heading
   // and then re-applied starting from the filter's CURRENT pose mu_
+
   void predict(double rot1, double trans, double rot2)
   {
     // -------------------------------------------------------
@@ -288,7 +289,7 @@ private:
     mu_ = mu_ + K_t * innovation;
     mu_(2) = normalizeAngle(mu_(2));
 
-    // Line 6: Covariance update  (Joseph form for numerical stability)
+    // Line 6: Covariance update  
     const Eigen::Matrix3d I_KH = Eigen::Matrix3d::Identity() - K_t * H_t;
     Sigma_ = I_KH * Sigma_ * I_KH.transpose() + K_t * Q * K_t.transpose();
   }
@@ -344,7 +345,7 @@ private:
     mu_ += K * innovation;
     mu_(2) = normalizeAngle(mu_(2));
 
-    // Covariance update  (Line 6, Joseph form)
+    // Covariance update 
     const Eigen::Matrix3d I_KH = Eigen::Matrix3d::Identity() - K * H;
     Sigma_ = I_KH * Sigma_ * I_KH.transpose() + K * Q_landmark_ * K.transpose();
   }

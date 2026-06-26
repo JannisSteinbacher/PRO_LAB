@@ -171,9 +171,7 @@ private:
   // The first message anchors the filter (and the odom-delta reference). Every
   // later message yields a world-frame pose INCREMENT u = [dx, dy, dtheta] that
   // is handed straight to the linear predict(). Only the delta is used, so the
-  // absolute odom drift never re-enters the estimate, and because odometry has
-  // already projected the body motion into world x/y, no nonlinearity remains
-  // in the node.
+  // absolute odom drift never re-enters the estimate.
   // ----------------------------------------------------------
   void predictFromOdom(const nav_msgs::msg::Odometry::ConstSharedPtr& msg)
   {
@@ -247,7 +245,7 @@ private:
 
     pose_pub_->publish(out);
 
-    // Publish the latest theta Kalman gain alongside the pose (same rate).
+    // Publish the latest theta Kalman gain alongside the pose (for evaluation).
     std_msgs::msg::Float64 kg;
     kg.data = k_theta_imu_;
     kgain_pub_->publish(kg);
@@ -256,9 +254,7 @@ private:
   // ============================================================
   //  Helpers
   // ============================================================
-  // Read a REQUIRED [d0, d1, d2] parameter and build a 3x3 diagonal noise
-  // matrix. No in-code default: if the value is not provided via parameters
-  // (filter_params.yaml) the node throws on start, so the YAML is always used.
+  // Read a REQUIRED [d0, d1, d2] parameter and build a 3x3 diagonal noise matrix.
   Eigen::Matrix3d diagMatrix3FromParam(const std::string& name)
   {
     declare_parameter(name, rclcpp::PARAMETER_DOUBLE_ARRAY);
