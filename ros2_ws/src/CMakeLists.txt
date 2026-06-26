@@ -20,7 +20,7 @@ find_package(tf2                REQUIRED)
 find_package(tf2_ros            REQUIRED)
 find_package(tf2_geometry_msgs  REQUIRED)
 # ==========================================
-# 2. CREATE EXECUTABLES (YOUR NODES)
+# 2. CREATE EXECUTABLES
 # ==========================================
 # Add the Kalman Filter Node
 add_executable(KF_node src/KF_node.cpp)
@@ -45,7 +45,7 @@ ament_target_dependencies(EKF_node
   tf2_ros
   message_filters)
 
-# Add the Particle Filter Node (Your specific focus area)
+# Add the Particle Filter Node
 add_executable(PF_node src/PF_node.cpp)
 ament_target_dependencies(PF_node 
   rclcpp 

@@ -112,7 +112,7 @@ class EvalNode(Node):
         # rate [Hz] so their rows line up 1:1 for direct comparison.
         self.declare_parameter('sync_rate_hz', 20.0)
         # Draw the PF series in the PNG plots. CSV output is unaffected (PF is
-        # always written); 
+        # always written).
         self.declare_parameter('plot_pf', False)
         gt_topic = (self.get_parameter('ground_truth_topic')
                     .get_parameter_value().string_value)

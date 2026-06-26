@@ -68,7 +68,7 @@ def main(args=None):
     )
     eval_start_pub = navigator.create_publisher(Empty, '/eval/start', start_qos)
 
-    # 3. Define the Waypoints (Adjust these to fit your example map!)
+    # 3. Define the Waypoints
     # create_waypoint(navigator, x_meters, y_meters, yaw_degrees)
     wp1 = create_waypoint(navigator, 5.2, 3.58, 0.0)
     wp2 = create_waypoint(navigator, 8.25, 5.166, 180.0)
@@ -91,7 +91,6 @@ def main(args=None):
 
     # Wait while the robot is driving
     while not navigator.isTaskComplete():
-        # You can do other things here, like print feedback or check sensors
         feedback = navigator.getFeedback()
         if feedback:
             print(f"Executing waypoint {feedback.current_waypoint} / {len(route)}", end="\r")
