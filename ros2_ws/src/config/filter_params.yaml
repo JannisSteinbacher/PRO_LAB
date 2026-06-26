@@ -52,13 +52,13 @@ pf_node:
   ros__parameters:
     # Number of starting particles — INTEGER, no decimal point.  More particles
     # cover more hypotheses but cost linearly more CPU per scan (was 2000).
-    num_particles: 7000
+    num_particles: 4000
 
-    # ---- Resampling softness (the knobs that stop the cloud collapsing) ----
+    # ---- Resampling softness  ----
     # Likelihood tempering  p(z|x)^lambda ,  0 < lambda <= 1  (double, needs a '.')
     #   lower  -> flatter weights: bad particles survive, more hypotheses kept
     #   higher -> sharper weights: faster convergence but more aggressive culling
-    weight_lambda: 0.05
+    weight_lambda: 0.03
 
     # Gaussian jitter added to every particle right after resampling, so the
     # duplicated good guesses spread out instead of becoming identical clones.
