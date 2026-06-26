@@ -39,7 +39,7 @@ public:
     Sigma_ = Eigen::Matrix3d::Identity() * 0.0;
 
     // ----------------------------------------------------------
-    // Noise matrices — loaded ONLY from parameters (config/filter_params.yaml).
+    // Noise matrices — loaded from parameters (config/filter_params.yaml).
     // ----------------------------------------------------------
     R_ = diagMatrix3FromParam("R_diag");
 
@@ -89,24 +89,28 @@ private:
 
 
   // ============================================================
-  //  Prediction Step, driven by the ODOMETRY motion model.
+  //  Prediction Step  —  LINEAR motion model.
   //
-  //  The odometry message is decomposed into a relative motion increment
+  //  The control input u_t = [dx, dy, dtheta] is the WORLD-FRAME pose
+  //  increment. The body->world rotation (the cos/sin of the heading) is the
+  //  nonlinearity, and it is performed OUTSIDE this node by the odometry
+  //  source, which already integrates the motion into world-frame x/y. The
+  //  node therefore only superimposes increments and stays fully linear.
   //
-  //  Line 2: mu_bar_t    = mu_{t-1} + u_t   (full nonlinear motion model)
+  //  Line 2: mu_bar_t    = A_t * mu_{t-1} + B_t * u_t
   //  Line 3: Sigma_bar_t = A_t * Sigma_{t-1} * A_t^T + R_t
   // ============================================================
 
-  void predict(double rot1, double trans, double rot2)
+  void predict(const Eigen::Vector3d& u)
   {
-    // Line 2: mean update — apply the increment along the FILTER heading.
-    const double heading = mu_(2) + rot1;
-    mu_(0) += trans * std::cos(heading);
-    mu_(1) += trans * std::sin(heading);
-    mu_(2)  = normalizeAngle(mu_(2) + rot1 + rot2);
-
-    // Line 3: covariance update with the linear-KF approximation A_t = I.
     const Eigen::Matrix3d A_t = Eigen::Matrix3d::Identity();
+    const Eigen::Matrix3d B_t = Eigen::Matrix3d::Identity();
+
+    // Line 2: linear mean update (no trigonometry of the state).
+    mu_ = A_t * mu_ + B_t * u;
+    mu_(2) = normalizeAngle(mu_(2));
+
+    // Line 3: covariance update.
     Sigma_ = A_t * Sigma_ * A_t.transpose() + R_;
   }
 
@@ -162,12 +166,14 @@ private:
   }
 
   // ----------------------------------------------------------
-  // predictFromOdom  —  turn the raw /odom pose into a relative motion input.
+  // predictFromOdom  —  turn the raw /odom pose into a world-frame motion input.
   //
   // The first message anchors the filter (and the odom-delta reference). Every
-  // later message yields a pose INCREMENT, decomposed into the odometry motion
-  // model (rot1, trans, rot2) and handed to predict(). Only the delta is used,
-  // so the absolute odom drift never re-enters the estimate.
+  // later message yields a world-frame pose INCREMENT u = [dx, dy, dtheta] that
+  // is handed straight to the linear predict(). Only the delta is used, so the
+  // absolute odom drift never re-enters the estimate, and because odometry has
+  // already projected the body motion into world x/y, no nonlinearity remains
+  // in the node.
   // ----------------------------------------------------------
   void predictFromOdom(const nav_msgs::msg::Odometry::ConstSharedPtr& msg)
   {
@@ -185,27 +191,14 @@ private:
       return;
     }
 
-    // Pose change reported by odometry since the last message (odom frame).
-    const double prev_yaw = last_odom_(2);
-    const double dx   = ox - last_odom_(0);
-    const double dy   = oy - last_odom_(1);
-    const double dyaw = normalizeAngle(oyaw - prev_yaw);
+    // World-frame pose increment reported by odometry since the last message.
+    Eigen::Vector3d u;
+    u(0) = ox - last_odom_(0);
+    u(1) = oy - last_odom_(1);
+    u(2) = normalizeAngle(oyaw - last_odom_(2));
     last_odom_ << ox, oy, oyaw;
 
-    // Decompose into rot1 / trans / rot2 (Thrun's odometry motion model).
-    // For a (near-)pure rotation the travel direction is ill-defined, so put
-    // the whole turn into rot2 instead of letting atan2 amplify odom jitter.
-    const double trans = std::hypot(dx, dy);
-    double rot1, rot2;
-    if (trans < 1e-4) {
-      rot1 = 0.0;
-      rot2 = dyaw;
-    } else {
-      rot1 = normalizeAngle(std::atan2(dy, dx) - prev_yaw);
-      rot2 = normalizeAngle(dyaw - rot1);
-    }
-
-    predict(rot1, trans, rot2);
+    predict(u);
   }
 
   void processImu(const sensor_msgs::msg::Imu::ConstSharedPtr& msg)

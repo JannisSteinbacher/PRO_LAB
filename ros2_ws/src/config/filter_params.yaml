@@ -8,12 +8,9 @@
 # ============================================================
 /**:
   ros__parameters:
-    # NOTE: R/Q are required (no in-code defaults) and strictly typed as
-    # doubles — always write a decimal point, e.g. 200.0 not 200, or the node
-    # rejects the value as an integer.
+
     # --- Process noise R : diagonal [x, y, theta]  (predict step) ---
     R_diag: [0.001, 0.001, 0.001]
-
 
     # --- Measurement noise Q : IMU yaw [theta]  (correct step) ---
     Q_imu: 0.05

@@ -15,12 +15,6 @@ Default ground truth topic: /world/depot/dynamic_pose/info
   ground-truth poses onto this topic as a PoseArray. The bridge drops entity
   names, so the robot is found by matching the 'ground_truth_spawn_xy' param
   (world-frame spawn, default [-8.0, 0.0]) and that array index is then locked.
-  -> If no ground truth shows up, check the bridge with:
-       ros2 topic echo <ground_truth_topic> --once
-  -> Override at runtime:
-       ros2 run turtlebot_state_estimation eval_node --ros-args \
-         -p ground_truth_topic:=/your/topic \
-         -p ground_truth_spawn_xy:='[-8.0, 0.0]'
 
 On shutdown (Ctrl+C / SIGTERM), writes to ros2_ws/eval_results/:
   filter_eval_<timestamp>.png   — 4-panel plot (trajectory, error, σ²_pos, σ²_yaw)
@@ -118,7 +112,7 @@ class EvalNode(Node):
         # rate [Hz] so their rows line up 1:1 for direct comparison.
         self.declare_parameter('sync_rate_hz', 20.0)
         # Draw the PF series in the PNG plots. CSV output is unaffected (PF is
-        # always written); this only controls the plot for now.
+        # always written); 
         self.declare_parameter('plot_pf', False)
         gt_topic = (self.get_parameter('ground_truth_topic')
                     .get_parameter_value().string_value)
@@ -393,7 +387,7 @@ class EvalNode(Node):
             return
         kf, ekf, pf = filters['kf'], filters['ekf'], filters['pf']
         if not self._plot_pf:
-            pf = None   # keep PF out of the PNG for now (still in the CSV)
+            pf = None   
 
         fig, axes = plt.subplots(2, 2, figsize=(14, 10))
         fig.suptitle('Filter Performance Evaluation', fontsize=14, fontweight='bold')

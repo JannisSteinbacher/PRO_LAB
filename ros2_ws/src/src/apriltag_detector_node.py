@@ -2,8 +2,6 @@
 """
 apriltag_detector_node.py — Detect AprilTag landmarks from the TurtleBot4 camera.
 
-Pipeline
---------
   /rgbd_camera/image        (sensor_msgs/Image)       --\
   /rgbd_camera/camera_info  (sensor_msgs/CameraInfo)  ---> cv2.aruco (tag36h11)
                                                             -> per-tag 3D pose
@@ -19,9 +17,6 @@ The EKF node consumes this, derives (range, bearing) = (hypot(x, y), atan2(y, x)
 and runs the landmark correction (Thrun, EKF_localization_known_correspondences).
 Publishing in base_link also makes the detections show up directly in RViz.
 
-Why cv2.aruco and not apriltag_ros?
-  OpenCV ships a tag36h11 dictionary (DICT_APRILTAG_36h11), so detection needs
-  no extra system packages — only cv_bridge + OpenCV, both already installed.
 
 Tag size note
   The textured quad is 0.2 m, but the *black square* the detector keys on is the
